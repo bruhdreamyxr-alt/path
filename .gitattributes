@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts MUST keep LF line endings. They are executed by bash on the
+# macOS CI runner, and a stray CRLF makes bash fail with:
+#   $'\r': command not found
+*.sh text eol=lf
+
+# Binary model/weights data - never normalise or diff these.
+*.bin binary

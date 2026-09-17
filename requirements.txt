@@ -1,0 +1,19 @@
+# Runtime dependencies for UniversalAudioStudio.
+# Pinned to the versions the 2.0.0 build is tested against.
+#
+# These all publish CPython 3.12 wheels for macOS (arm64 + x86_64), which is the
+# interpreter the macOS build uses -- see tools/build_macos.sh.
+customtkinter==6.0.0
+darkdetect==0.8.0
+numpy==2.5.0
+pillow==12.3.0
+soundfile==0.14.0          # bundles libsndfile
+sounddevice==0.5.6         # bundles PortAudio
+pedalboard==0.9.23
+mutagen==1.48.1
+yt-dlp==2026.8.19
+curl_cffi==0.15.0
+certifi==2026.7.22
+
+# Build tooling only (not imported by the app).
+pyinstaller==6.22.2

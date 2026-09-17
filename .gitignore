@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------
+# Windows helper binaries (NOT needed for the macOS build)
+# ---------------------------------------------------------------
+# These are 5-222 MB each and ffmpeg.exe/ffprobe.exe exceed GitHub's 100 MB
+# per-file hard limit, so pushing them would be rejected. They are also
+# Windows-only PE binaries that cannot run on macOS at all -- the Mac build
+# fetches its own Mach-O helpers via tools/fetch_mac_helpers.sh.
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
+yt-dlp.exe
+aria2c.exe
+updater_cli.exe
+
+# ---------------------------------------------------------------
+# Build outputs
+# ---------------------------------------------------------------
+build/
+dist/
+*.dmg
+mysetup*.exe
+*.bak
+
+# ---------------------------------------------------------------
+# Local environments and caches
+# ---------------------------------------------------------------
+.venv/
+.venv-mac/
+__pycache__/
+*.pyc
+
+# ---------------------------------------------------------------
+# Per-user runtime state (machine-specific, regenerated on launch)
+# ---------------------------------------------------------------
+download_history.json
+download_queue.json
+ui_prefs.json
+.legacy_data_migrated

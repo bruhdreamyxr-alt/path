@@ -1,0 +1,66 @@
+name: Build macOS app
+
+# Produces dist/UniversalAudioStudio-<version>.dmg using a real macOS runner.
+# PyInstaller cannot cross-compile, so this is what lets you create a Mac build
+# without owning a Mac.
+#
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. Actions -> "Build macOS app" -> Run workflow.
+#   3. Download the "UniversalAudioStudio-macOS-dmg" artifact when it finishes.
+#      (Artifacts need a GitHub login; for a plain public download link your
+#       friend can use, push a tag instead - e.g. `git tag v2.0.0 && git push
+#       --tags` - and this workflow attaches the .dmg to a Release.)
+
+on:
+  workflow_dispatch:      # the "Run workflow" button
+  push:
+    tags:
+      - 'v*'              # also build + publish a Release on version tags
+
+permissions:
+  contents: write         # needed to attach the .dmg to a Release
+
+jobs:
+  build-macos:
+    # macos-14 is Apple Silicon (arm64). Use macos-13 for an Intel build, or
+    # build both by adding it to the matrix below.
+    runs-on: macos-14
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # requirements.txt pins wheels for 3.12
+
+      - name: Build .app and .dmg
+        run: bash tools/build_macos.sh
+
+      - name: Show what was produced
+        run: |
+          ls -lh dist/
+          du -sh dist/UniversalAudioStudio.app
+
+      - name: Upload the .dmg as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UniversalAudioStudio-macOS-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - name: Attach the .dmg to a Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          body: |
+            macOS build of Universal Audio Studio.
+
+            The app is ad-hoc signed (not notarised), so on first launch macOS
+            will warn about an unidentified developer. Open it once with
+            right-click -> Open, or run:
+
+                xattr -dr com.apple.quarantine /Applications/UniversalAudioStudio.app
