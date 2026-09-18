@@ -1,16 +1,24 @@
 name: Build macOS app
 
-# Produces dist/UniversalAudioStudio-<version>.dmg using a real macOS runner.
-# PyInstaller cannot cross-compile, so this is what lets you create a Mac build
-# without owning a Mac.
+# Produces UniversalAudioStudio-<version>-<arch>.dmg on real macOS runners: one
+# for Apple Silicon and one for Intel, so a single run covers either Mac.
+# PyInstaller cannot cross-compile, so each architecture is built on its own
+# runner (macos-15 is arm64, macos-15-intel is x86_64).
+#
+# Why Python 3.13 rather than 3.14: pedalboard publishes no macOS x86_64 wheel
+# for 3.14 (arm64 only - checked against PyPI for both 0.9.23 and 0.9.25), so
+# 3.14 can only build the Apple Silicon app. 3.13 has wheels for both
+# architectures, and tools/check_mac_wheels.py enforces this before any build.
 #
 # How to use:
 #   1. Push this repo to GitHub.
 #   2. Actions -> "Build macOS app" -> Run workflow.
-#   3. Download the "UniversalAudioStudio-macOS-dmg" artifact when it finishes.
-#      (Artifacts need a GitHub login; for a plain public download link your
-#       friend can use, push a tag instead - e.g. `git tag v2.0.0 && git push
-#       --tags` - and this workflow attaches the .dmg to a Release.)
+#   3. Download the artifact for the Mac you are sending it to:
+#        UniversalAudioStudio-macOS-apple-silicon-dmg
+#        UniversalAudioStudio-macOS-intel-dmg
+#      (Artifacts need a GitHub login. For a plain public download link, push a
+#       tag instead - e.g. `git tag v2.0.0 && git push --tags` - and this
+#       workflow attaches both .dmg files to a Release.)
 
 on:
   workflow_dispatch:      # the "Run workflow" button
@@ -19,13 +27,25 @@ on:
       - 'v*'              # also build + publish a Release on version tags
 
 permissions:
-  contents: write         # needed to attach the .dmg to a Release
+  contents: write         # needed to attach the .dmg files to a Release
 
 jobs:
   build-macos:
-    # macos-14 is Apple Silicon (arm64). Use macos-13 for an Intel build, or
-    # build both by adding it to the matrix below.
-    runs-on: macos-14
+    strategy:
+      # One architecture failing must not cancel the other.
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15 is Apple Silicon. macos-14 is deprecated (unsupported from
+          # November 2026), so it is no longer used.
+          - runner: macos-15
+            arch: arm64
+            label: apple-silicon
+          # macos-15-intel is the standard Intel (x86_64) macOS runner.
+          - runner: macos-15-intel
+            arch: x86_64
+            label: intel
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Check out the repository
@@ -34,13 +54,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          # Must match the interpreter the app is developed and tested with
-          # (3.14 locally). The next step proves every pin has a macOS wheel
-          # for whatever version this resolves to.
-          python-version: '3.14'
+          # Must have wheels for BOTH architectures - see the note at the top.
+          python-version: '3.13'
 
       - name: Show the build environment
         run: |
+          echo "runner:  ${{ matrix.runner }}  (${{ matrix.arch }})"
           echo "macOS:   $(sw_vers -productVersion)   arch: $(uname -m)"
           echo "Python:  $(python -V 2>&1)   at: $(command -v python)"
           echo "bash:    $BASH_VERSION"
@@ -50,12 +69,12 @@ jobs:
           df -h . | tail -n1
 
       - name: Check every pin has a macOS wheel
-        # Catches an uninstallable pin in about 20 seconds with a short list,
-        # instead of an opaque "Process completed with exit code N" from pip.
+        # Catches an uninstallable pin in ~20 seconds with a short readable
+        # list, instead of an opaque "Process completed with exit code N".
         run: |
           python tools/check_mac_wheels.py \
             --python "$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" \
-            --arch "$(uname -m)"
+            --arch "${{ matrix.arch }}"
 
       - name: Build .app and .dmg
         run: bash tools/build_macos.sh
@@ -68,20 +87,38 @@ jobs:
       - name: Upload the .dmg as a build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: UniversalAudioStudio-macOS-dmg
+          name: UniversalAudioStudio-macOS-${{ matrix.label }}-dmg
           path: dist/*.dmg
           if-no-files-found: error
 
-      - name: Attach the .dmg to a Release (tag builds only)
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    # A separate job so both architectures land in one Release without the two
+    # build jobs racing to create it.
+    needs: build-macos
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download both .dmg artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dmgs
+          merge-multiple: true
+
+      - name: Attach the .dmg files to a Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/*.dmg
+          files: dmgs/*.dmg
           body: |
-            macOS build of Universal Audio Studio.
+            macOS builds of Universal Audio Studio.
 
-            The app is ad-hoc signed (not notarised), so on first launch macOS
-            will warn about an unidentified developer. Open it once with
+            Pick the file for your Mac:
+
+            * `...-arm64.dmg`  - Apple Silicon (M1/M2/M3/M4)
+            * `...-x86_64.dmg` - Intel
+
+            The apps are ad-hoc signed (not notarised), so on first launch macOS
+            warns about an unidentified developer. Open it once with
             right-click -> Open, or run:
 
                 xattr -dr com.apple.quarantine /Applications/UniversalAudioStudio.app

@@ -111,6 +111,39 @@ class WheelSupportTests(unittest.TestCase):
         self.assertFalse(check_mac_wheels.wheel_supports(
             "numpy-2.5.0-cp314-cp314-macosx_11_0_arm64.whl", (3, 12), "arm64"))
 
+    def test_rejects_older_non_abi3_tag(self):
+        """cp310-cp310 is pegged to 3.10 - it must not satisfy 3.14.
+
+        Ignoring the abi tag made the checker report false passes.
+        """
+        self.assertFalse(check_mac_wheels.wheel_supports(
+            "pedalboard-0.9.23-cp310-cp310-macosx_10_14_x86_64.whl",
+            (3, 14), "x86_64"))
+
+    def test_rejects_free_threaded_wheel(self):
+        """cp3XXt wheels need a free-threaded interpreter."""
+        self.assertFalse(check_mac_wheels.wheel_supports(
+            "pedalboard-0.9.23-cp314-cp314t-macosx_11_0_arm64.whl",
+            (3, 14), "arm64"))
+
+    def test_pedalboard_blocks_python_314_on_intel(self):
+        """The real constraint behind the dual-architecture build.
+
+        pedalboard publishes cp314 macOS wheels for arm64 only (verified
+        against PyPI for both 0.9.23 and 0.9.25), so 3.14 cannot be used on an
+        Intel runner. 3.13 has wheels for both architectures.
+        """
+        cp314 = "pedalboard-0.9.25-cp314-cp314-macosx_11_0_arm64.whl"
+        self.assertFalse(
+            check_mac_wheels.wheel_supports(cp314, (3, 14), "x86_64"))
+        self.assertTrue(
+            check_mac_wheels.wheel_supports(cp314, (3, 14), "arm64"))
+        for arch in ("arm64", "x86_64"):
+            self.assertTrue(check_mac_wheels.wheel_supports(
+                "pedalboard-0.9.23-cp313-cp313-macosx_%s.whl"
+                % ("11_0_arm64" if arch == "arm64" else "10_14_x86_64"),
+                (3, 13), arch))
+
     def test_rejects_wrong_platform_or_arch(self):
         for name in (
             "numpy-2.5.0-cp312-cp312-win_amd64.whl",

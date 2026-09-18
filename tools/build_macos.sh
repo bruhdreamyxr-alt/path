@@ -5,7 +5,9 @@
 #
 # Outputs:
 #   dist/UniversalAudioStudio.app
-#   dist/UniversalAudioStudio-<version>.dmg   <-- send THIS to your friend
+#   dist/UniversalAudioStudio-<version>-<arch>.dmg   <-- send THIS to your friend
+#       (arch is arm64 for Apple Silicon or x86_64 for Intel; the dual-
+#        architecture cloud build produces one of each)
 #
 # PyInstaller cannot cross-compile, so this must run on a Mac (or a macOS CI
 # runner - see .github/workflows/build-macos.yml, which produces the .dmg for
@@ -67,7 +69,10 @@ echo "==> 6/6 Creating .dmg"
 # with "unexpected EOF while looking for matching `)'" and exit status 2,
 # before printing which line broke. Keep this file bash 3.2 compatible.
 VERSION="$(python tools/get_version.py)"
-DMG="dist/UniversalAudioStudio-${VERSION}.dmg"
+# Include the architecture in the filename: the dual-architecture build emits
+# one .dmg per architecture and they must not collide in a Release.
+ARCH_LABEL="$(uname -m)"          # arm64 (Apple Silicon) or x86_64 (Intel)
+DMG="dist/UniversalAudioStudio-${VERSION}-${ARCH_LABEL}.dmg"
 rm -f "$DMG"
 STAGE="$(mktemp -d)"
 cp -R "dist/UniversalAudioStudio.app" "$STAGE/"

@@ -20,8 +20,8 @@ just download it.
 ### Step 1 - Put this folder on GitHub (using the GUI, no command line)
 
 This folder is **already set up as a Git repository**: the GitHub remote is
-configured and three commits are waiting to upload. There is nothing to create -
-you only have to push.
+configured and commits are waiting to upload. There is nothing to create - you
+only have to push.
 
 1. Install **GitHub Desktop** from <https://desktop.github.com> if you don't
    have it, then open it and sign in as **bruhdreamyxr-alt** (the account that
@@ -29,12 +29,13 @@ you only have to push.
 2. Menu **File -> Add local repository...**
 3. Paste the path (it is already on your clipboard):
    `C:\Users\antho\Downloads\scripts\path`
-4. GitHub Desktop lists the repository with **3 commits to push**.
+4. GitHub Desktop lists the repository with commits waiting to push.
 5. Click **Push origin** at the top. The upload takes a minute or two.
 
 > The `.gitignore` file in this folder is what makes this upload possible. It
 > excludes the huge Windows `.exe` files - `ffmpeg.exe` alone is 222 MB, and
-> GitHub rejects any single file over 100 MB. Only 29 files (~11 MB) are sent.
+> GitHub rejects any single file over 100 MB. Only ~30 small files (~11 MB) are
+> sent.
 
 ### Step 2 - Run the Mac build
 
@@ -45,14 +46,30 @@ you only have to push.
 4. On the right, click **Run workflow** -> then the green **Run workflow** button.
 5. Wait. It takes about 10-15 minutes. Refresh the page to see progress.
    A green tick means it worked.
-6. Click on the finished run, scroll to the bottom, and download the artifact
-   named **UniversalAudioStudio-macOS-dmg**. It arrives as a `.zip` -
-   unzip it and you have your `UniversalAudioStudio-2.0.0.dmg`.
+6. Wait for **two** jobs to finish - one per Mac architecture. Click the
+   finished run, scroll to the bottom, and download the artifact for the Mac you
+   are sending it to:
+   * **UniversalAudioStudio-macOS-apple-silicon-dmg** for M1/M2/M3/M4 Macs
+   * **UniversalAudioStudio-macOS-intel-dmg** for older Intel Macs
+
+   Each arrives as a `.zip`; unzip it and you get
+   `UniversalAudioStudio-2.0.0-arm64.dmg` or `...-x86_64.dmg`. If you don't know
+   which Mac your friend has, download both.
 
 ### Step 3 - Give it to your friend
 
-The `.dmg` is roughly 250-350 MB. Upload it to Google Drive (the same way you
-share the Windows update zip) and send them the link.
+The `.dmg` is roughly 130 MB. Upload it to Google Drive (the same way you share
+the Windows update zip) and send them the link.
+
+Send the file that matches their Mac:
+
+| Their Mac | Send this |
+|---|---|
+| Apple Silicon (M1/M2/M3/M4 - any Mac from late 2020 on) | `...-arm64.dmg` |
+| Intel (older) | `...-x86_64.dmg` |
+
+An Apple Silicon app will **not** run on an Intel Mac, and Rosetta only
+translates the other way round, so sending the right file matters.
 
 ---
 
@@ -63,7 +80,7 @@ On the Mac, in a terminal:
 ```bash
 # one-off: install Python and the toolchain
 xcode-select --install          # click Install when prompted
-brew install python@3.12        # https://brew.sh if you don't have brew
+brew install python@3.13        # https://brew.sh if you don't have brew
 
 # then, from inside this project folder:
 bash tools/build_macos.sh
@@ -74,8 +91,11 @@ binaries, runs the test suite, builds the app, signs it, and produces:
 
 ```
 dist/UniversalAudioStudio.app
-dist/UniversalAudioStudio-2.0.0.dmg   <-- send this one
+dist/UniversalAudioStudio-2.0.0-<arch>.dmg   <-- send this one
 ```
+
+`<arch>` is `arm64` on Apple Silicon or `x86_64` on an Intel Mac - the script
+builds for whichever Mac it runs on.
 
 ---
 
@@ -112,6 +132,13 @@ After that it launches normally forever. (Terminal alternative:
   code 2, without naming the real problem. That is exactly how the first cloud
   build failed. `tests/test_build_tooling.py` now fails if a here-document is
   reintroduced, and the version is read via `tools/get_version.py` instead.
+* **Two architectures are built, because one `.dmg` cannot cover both.** The
+  workflow builds on `macos-15` (Apple Silicon) and `macos-15-intel` (Intel).
+  It has to use **Python 3.13**: pedalboard publishes no macOS Intel wheel for
+  3.14 (arm64 only - checked against PyPI for both 0.9.23 and 0.9.25), so 3.14
+  can only produce the Apple Silicon app. `tools/check_mac_wheels.py` runs
+  before every build and fails in ~20 seconds if a pin is not installable for
+  the target architecture, so this cannot regress silently.
 * **aria2c is deliberately not bundled on Mac.** No static macOS build exists,
   and Homebrew's version depends on `/opt/homebrew` libraries that won't exist
   on your friend's Mac. Downloads fall back to yt-dlp's built-in downloader:
@@ -131,12 +158,18 @@ After that it launches normally forever. (Terminal alternative:
 
 ## If the cloud build fails
 
-The macOS-only steps have never actually been executed - that needs a real Mac.
-The test suite does run as step 3 of the build (48 tests, including simulated
-macOS checks for the data paths above), so a failure there aborts before the
-build. If the first run fails, open the failed step to see the error. The most
-likely culprits:
+A first cloud run **did succeed** for Apple Silicon, but the dual-architecture
+matrix and the Intel runner have not been exercised yet. The test suite (68
+tests) runs as step 3 of the build and `tools/check_mac_wheels.py` runs before
+it, so dependency problems fail early and readably. Any failing script line now
+emits an annotation naming the exact line and command.
 
-* a dependency in `requirements.txt` lacking a wheel for the runner's Python,
+The most likely culprits:
+
+* a dependency in `requirements.txt` lacking a wheel for the runner's Python -
+  reproduce it locally in about 20 seconds with
+  `python tools/check_mac_wheels.py --python 3.13 --arch x86_64`,
+* the `macos-15-intel` runner label changing - pick another Intel label from
+  <https://github.com/actions/runner-images#available-images>,
 * a helper download URL having moved (`tools/fetch_mac_helpers.sh` prints each
   URL it uses and verifies `--version` on every binary it fetches).

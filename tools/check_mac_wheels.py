@@ -69,20 +69,35 @@ def _split_tags(filename):
     return parts[-3], parts[-2], parts[-1]
 
 
-def _python_tag_ok(python_tag, target):
-    """True when a wheel's python tag runs on *target*.
+def _python_tag_ok(python_tag, abi_tag, target):
+    """True when a wheel's python + abi tags run on *target*.
 
-    ``py3`` covers any Python 3 (many packages ship a platform-specific wheel
-    tagged ``py3-none-macosx...`` - pyinstaller does). Otherwise the tag is
-    ``cp3X`` and must be at or below the target, which also covers abi3 wheels
-    such as ``cp37-abi3-macosx_11_0_arm64``.
+    This deliberately inspects the abi tag. Accepting any ``cp3X`` at or below
+    the target is only correct for the stable ABI; a plain ``cp310-cp310`` wheel
+    is built against CPython 3.10's ABI and is NOT installable on 3.14. Ignoring
+    the abi tag produced false passes - the checker once claimed pedalboard had
+    a macOS x86_64 wheel for 3.14 when such a wheel does not exist.
     """
     if python_tag in ("py3", "py2.py3"):
         return True
-    match = re.match(r"^cp3(\d+)$", python_tag)
-    if not match:
+    found = re.match(r"^cp3(\d+)(t?)$", python_tag)
+    if not found:
         return False
-    return (3, int(match.group(1))) <= target
+    # Free-threaded wheels are tagged cp3XXt; the marker normally sits in the
+    # abi tag (cp314-cp314t) but may appear in the python tag too. Either way
+    # they need a free-threaded interpreter, which this build does not use.
+    if found.group(2) == "t" or re.match(r"^cp3\d+t$", abi_tag):
+        return False
+    minor = int(found.group(1))
+    if abi_tag == "abi3":
+        # Stable ABI: usable by this or any newer CPython 3.
+        return (3, minor) <= target
+    # Otherwise the wheel is pegged to exactly one CPython version, and the abi
+    # tag has to agree with the python tag.
+    abi_found = re.match(r"^cp3(\d+)$", abi_tag)
+    if abi_found and int(abi_found.group(1)) != minor:
+        return False
+    return (3, minor) == target
 
 
 def wheel_supports(filename, target, arch):
@@ -90,14 +105,14 @@ def wheel_supports(filename, target, arch):
     tags = _split_tags(filename)
     if tags is None:
         return False
-    python_tag, _abi_tag, platform_tag = tags
+    python_tag, abi_tag, platform_tag = tags
     if platform_tag == "any":
-        return _python_tag_ok(python_tag, target)
+        return _python_tag_ok(python_tag, abi_tag, target)
     if not platform_tag.startswith("macosx"):
         return False
     if not (arch in platform_tag or "universal2" in platform_tag):
         return False
-    return _python_tag_ok(python_tag, target)
+    return _python_tag_ok(python_tag, abi_tag, target)
 
 
 def requires_python_ok(spec, target):
