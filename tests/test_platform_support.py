@@ -7,6 +7,7 @@ silently failed on macOS:
   ``ValueError`` for a non-zero value, which would break every download.
 * helper binaries are named ``ffmpeg.exe`` on Windows but ``ffmpeg`` on macOS.
 """
+import contextlib
 import os
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import download_queue  # noqa: E402
 import downloader  # noqa: E402
 
 
@@ -123,6 +125,98 @@ class OpenInFileManagerTests(unittest.TestCase):
                                create=True) as startfile:
             downloader.open_in_file_manager(r"C:\Temp")
             startfile.assert_called_once_with(r"C:\Temp")
+
+
+class UserDataDirTests(unittest.TestCase):
+    """Where runtime data goes on macOS.
+
+    ``%APPDATA%``/``%LOCALAPPDATA%`` do not exist on macOS, so a Windows-only
+    lookup finds nothing and falls through to the folder next to the
+    executable. Inside a ``.app`` bundle that is read-only as soon as Gatekeeper
+    applies App Translocation to a downloaded app, and writing to it also
+    invalidates the ad-hoc code signature - so history, the artwork cache and
+    the UI prefs all have to live in ``~/Library/Application Support``.
+    """
+
+    _WINDOWS_ONLY_VARS = ("APPDATA", "LOCALAPPDATA", "XDG_DATA_HOME")
+    _MAC_HOME = "/Users/tester"
+    # Joined from components exactly like the code under test, so the value
+    # matches on whichever platform the suite runs (Windows inserts "\\").
+    _MAC_EXPECTED = os.path.join("/Users/tester", "Library",
+                                 "Application Support", "AudioDownloader")
+
+    def _simulate(self, platform, home):
+        """Make the environment look like a native Mac/Linux run.
+
+        Clears the Windows-only variables and fakes the platform + home dir.
+        Returns an ExitStack for use as a context manager.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if k not in self._WINDOWS_ONLY_VARS}
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+        stack.enter_context(mock.patch.object(sys, "platform", platform))
+        stack.enter_context(mock.patch.object(os.path, "expanduser",
+                                              lambda p: home))
+        return stack
+
+    def test_macos_uses_library_application_support(self):
+        # os.makedirs is patched: the faked "/Users/tester" path would otherwise
+        # be created for real on a Windows machine running this suite.
+        with self._simulate("darwin", self._MAC_HOME), mock.patch("os.makedirs"):
+            self.assertEqual(download_queue._get_app_data_dir(),
+                             self._MAC_EXPECTED)
+
+    def test_macos_user_data_dir_matches_history_dir(self):
+        """Cache, updatable yt-dlp copy and history must share one folder."""
+        with self._simulate("darwin", self._MAC_HOME), mock.patch("os.makedirs"):
+            self.assertEqual(downloader._get_user_data_dir(),
+                             download_queue._get_app_data_dir())
+
+    def test_macos_never_resolves_inside_the_app_bundle(self):
+        """The actual regression: writing into the .app breaks its signature."""
+        app = "/Users/tester/Applications/UniversalAudioStudio.app"
+        exe = os.path.join(app, "Contents", "MacOS", "UniversalAudioStudio")
+        with self._simulate("darwin", self._MAC_HOME), \
+             mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch.object(sys, "executable", exe), \
+             mock.patch("os.makedirs"):
+            resolved = download_queue._get_app_data_dir()
+        self.assertEqual(resolved, self._MAC_EXPECTED)
+        self.assertNotIn(".app", resolved)
+
+    def test_linux_uses_xdg_data_home(self):
+        with self._simulate("linux", "/home/tester"), mock.patch("os.makedirs"):
+            self.assertEqual(
+                download_queue._get_app_data_dir(),
+                os.path.join("/home/tester", ".local", "share",
+                             "AudioDownloader"),
+            )
+
+    def test_windows_still_prefers_appdata(self):
+        """Regression guard: the original Windows fix must keep working."""
+        appdata = r"C:\Users\tester\AppData\Roaming"
+        env = {k: v for k, v in os.environ.items()
+               if k not in self._WINDOWS_ONLY_VARS}
+        env["APPDATA"] = appdata
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("os.makedirs"):
+            self.assertEqual(download_queue._get_app_data_dir(),
+                             os.path.join(appdata, "AudioDownloader"))
+
+    def test_ui_prefs_use_the_same_folder(self):
+        import ui  # lazy: importing ui pulls in customtkinter/tkinter
+
+        # __init__ would create a real Tk window, so bypass it.
+        window = object.__new__(ui.UniversalAudioStudio)
+        with self._simulate("darwin", self._MAC_HOME), \
+             mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch("os.makedirs"):
+            self.assertEqual(
+                window._get_pref_path(),
+                os.path.join(self._MAC_EXPECTED,
+                             ui.UniversalAudioStudio._PREF_FILENAME),
+            )
 
 
 if __name__ == "__main__":

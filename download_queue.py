@@ -32,18 +32,48 @@ def _legacy_data_dirs():
     return [d for d in dirs if d]
 
 
+def _user_data_base() -> Optional[str]:
+    """Return this platform's per-user data root, or ``None`` if unknown.
+
+    Windows exposes ``%APPDATA%``/``%LOCALAPPDATA%``, but neither variable
+    exists on macOS or Linux. A Windows-only lookup therefore finds nothing
+    there and falls through to the folder next to the executable - which inside
+    a macOS ``.app`` bundle is read-only once Gatekeeper applies App
+    Translocation to a downloaded app, and writing to it also invalidates the
+    ad-hoc code signature.
+
+    So: prefer the Windows variables, then ``~/Library/Application Support`` on
+    macOS, then ``$XDG_DATA_HOME`` (or ``~/.local/share``) on Linux/BSD.
+    """
+    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+    if base:
+        return base
+    if sys.platform == "darwin":
+        home = os.path.expanduser("~")
+        if home and home != "~":
+            return os.path.join(home, "Library", "Application Support")
+        return None
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return xdg
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        return os.path.join(home, ".local", "share")
+    return None
+
+
 def _get_app_data_dir() -> str:
     """Return a writable per-user directory for runtime data (history/queue).
 
     The packaged app installs under ``C:\\Program Files`` (via the Inno Setup
     installer), which is read-only without elevation. Writing history next to
     the executable there fails with PermissionError and the error was silently
-    swallowed, so the History tab always looked empty. ``%APPDATA%`` is always
-    writable for the current user, so prefer it (matching where the UI prefs
-    already live) and fall back to ``%LOCALAPPDATA%``, then the executable or
-    module folder, only if it is unavailable.
+    swallowed, so the History tab always looked empty. The platform's per-user
+    data root (see :func:`_user_data_base`) is always writable for the current
+    user, so prefer it and fall back to the executable or module folder only if
+    it is unavailable.
     """
-    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+    base = _user_data_base()
     if base:
         target = os.path.join(base, "AudioDownloader")
         try:

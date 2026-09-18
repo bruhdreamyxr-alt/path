@@ -248,16 +248,43 @@ def get_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _user_data_base() -> Optional[str]:
+    """Return this platform's per-user data root, or ``None`` if unknown.
+
+    Mirrors ``download_queue._user_data_base`` so history, the artwork cache and
+    the updatable yt-dlp copy all land in the *same* folder. Windows uses
+    ``%APPDATA%``/``%LOCALAPPDATA%``, macOS ``~/Library/Application Support``
+    and Linux/BSD ``$XDG_DATA_HOME`` or ``~/.local/share``. The macOS/Linux
+    branches matter because neither Windows variable exists there, which
+    previously made writes target the (unwritable) ``.app`` bundle.
+    """
+    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+    if base:
+        return base
+    if sys.platform == "darwin":
+        home = os.path.expanduser("~")
+        if home and home != "~":
+            return os.path.join(home, "Library", "Application Support")
+        return None
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return xdg
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        return os.path.join(home, ".local", "share")
+    return None
+
+
 def _get_user_data_dir() -> str:
     """Return a writable per-user directory for runtime data (caches).
 
     The packaged app installs under ``C:\\Program Files``, which standard users
     cannot write to. ``get_base_dir()`` therefore points at a read-only folder
-    in frozen builds and must never be used as a write target. This returns
-    ``%APPDATA%\\AudioDownloader`` (the same folder history/queue use) and
-    falls back to the executable/module folder only if that is unavailable.
+    in frozen builds and must never be used as a write target. This returns the
+    platform's per-user data folder (the same one history/queue use) and falls
+    back to the executable/module folder only if that is unavailable.
     """
-    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+    base = _user_data_base()
     if base:
         target = os.path.join(base, "AudioDownloader")
         try:

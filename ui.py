@@ -387,20 +387,17 @@ class UniversalAudioStudio(ctk.CTk):
     _PREF_FILENAME = "ui_prefs.json"
 
     def _get_pref_path(self) -> str:
-        """Store prefs in %APPDATA% for the packaged app, alongside ui.py in dev.
+        """Store prefs in the per-user data folder when packaged, beside ui.py
+        when running from source.
 
         The Program Files install directory is not writable by standard users,
         so storing next to the EXE would silently drop every preference.
+        Deliberately delegates to ``downloader._get_user_data_dir()`` so prefs
+        land in the same folder as history and the caches on every platform
+        (``%APPDATA%`` on Windows, ``~/Library/Application Support`` on macOS).
         """
         if getattr(sys, "frozen", False):
-            base_dir = os.path.join(
-                os.environ.get("APPDATA") or os.path.expanduser("~"),
-                "AudioDownloader",
-            )
-            try:
-                os.makedirs(base_dir, exist_ok=True)
-            except Exception:
-                base_dir = downloader.get_base_dir()
+            base_dir = downloader._get_user_data_dir()
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(base_dir, self._PREF_FILENAME)
