@@ -104,6 +104,14 @@ After that it launches normally forever. (Terminal alternative:
   a month at ~10 minutes each. Public repos are free and unmetered.
 * **Do not delete the `tools/` folder or `UniversalAudioStudio_mac.spec`** -
   the cloud build needs them.
+* **The build scripts must stay bash 3.2 compatible.** macOS ships bash 3.2 as
+  `/bin/bash`, and so do the GitHub macOS runners (they report
+  "Bash 3.2.57(1)-release"). bash 3.2 **cannot parse a here-document nested
+  inside a command substitution** - it reads to EOF hunting for the matching
+  `)`, then dies with `unexpected EOF while looking for matching ')'` and exit
+  code 2, without naming the real problem. That is exactly how the first cloud
+  build failed. `tests/test_build_tooling.py` now fails if a here-document is
+  reintroduced, and the version is read via `tools/get_version.py` instead.
 * **aria2c is deliberately not bundled on Mac.** No static macOS build exists,
   and Homebrew's version depends on `/opt/homebrew` libraries that won't exist
   on your friend's Mac. Downloads fall back to yt-dlp's built-in downloader:

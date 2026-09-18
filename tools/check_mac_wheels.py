@@ -129,7 +129,10 @@ def requires_python_ok(spec, target):
             # ~=3.9 means ">=3.9, <4"; ~=3.9.1 means ">=3.9.1, <3.10".
             if not target >= ref:
                 return False
-            if len(parts) == 2 and target[0] != parts[0]:
+            if len(parts) == 2:
+                if target[0] != parts[0]:
+                    return False
+            elif target[:2] != (parts[0], parts[1]):
                 return False
     return True
 

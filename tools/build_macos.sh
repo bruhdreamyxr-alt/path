@@ -61,13 +61,12 @@ codesign --force --deep --sign - "dist/UniversalAudioStudio.app" \
 
 echo
 echo "==> 6/6 Creating .dmg"
-VERSION="$(python - <<'PY'
-import re
-src = open('version.py', encoding='utf-8').read()
-m = re.search(r'__version__\s*=\s*["\']([^"\']+)', src)
-print(m.group(1) if m else '0.0.0')
-PY
-)"
+# Read the version via a helper script, NOT a here-document inside "$( )":
+# macOS ships bash 3.2 as /bin/bash (the GitHub macOS runners report
+# "Bash 3.2.57(1)-release") and bash 3.2 cannot parse that nesting - it fails
+# with "unexpected EOF while looking for matching `)'" and exit status 2,
+# before printing which line broke. Keep this file bash 3.2 compatible.
+VERSION="$(python tools/get_version.py)"
 DMG="dist/UniversalAudioStudio-${VERSION}.dmg"
 rm -f "$DMG"
 STAGE="$(mktemp -d)"
