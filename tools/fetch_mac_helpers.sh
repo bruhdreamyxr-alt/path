@@ -14,6 +14,9 @@
 #   yt-dlp           : official yt-dlp release "yt-dlp_macos" (self-contained)
 set -euo pipefail
 
+# Same self-announcing failure handling as build_macos.sh.
+trap 'status=$?; echo "::error file=tools/fetch_mac_helpers.sh,line=$LINENO::failed (exit $status): $BASH_COMMAND" >&2; exit $status' ERR
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
@@ -37,7 +40,10 @@ fetch_ff() {
   curl -fL --retry 3 --retry-delay 2 -o "$tmp/$who.zip" "$FF_BASE/$who.zip"
   unzip -o -q "$tmp/$who.zip" -d "$tmp"
   local bin
-  bin="$(find "$tmp" -type f -name "$who" | head -n1)"
+  # -print -quit stops at the first match. Piping into `head -n1` would make
+  # `set -o pipefail` abort the script with SIGPIPE if the zip ever contained
+  # more than one match.
+  bin="$(find "$tmp" -type f -name "$who" -print -quit)"
   if [ -z "$bin" ]; then
     echo "ERROR: '$who' not found inside $who.zip" >&2
     rm -rf "$tmp"
@@ -71,8 +77,11 @@ echo
 echo "==> bundled helpers:"
 for f in ffmpeg ffprobe yt-dlp; do
   if [ -x "$HERE/$f" ]; then
+    # `|| true` stops `set -o pipefail` from failing the script if the tool
+    # exits non-zero or closes the pipe early.
+    _ver="$("$HERE/$f" --version 2>/dev/null | head -n1 || true)"
     printf '    %-8s %s  %s\n' "$f" "$(ls -lh "$HERE/$f" | awk '{print $5}')" \
-      "$("$HERE/$f" --version 2>/dev/null | head -n1 || echo 'VERSION CHECK FAILED')"
+      "${_ver:-VERSION CHECK FAILED}"
   else
     echo "    $f MISSING" >&2
   fi

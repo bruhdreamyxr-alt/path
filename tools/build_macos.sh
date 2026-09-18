@@ -12,11 +12,18 @@
 # you without needing a Mac).
 set -euo pipefail
 
+# Turn any failure into a visible GitHub annotation naming the exact line and
+# command, so a failed run explains itself on the run page instead of only
+# inside the raw step log.
+trap 'status=$?; echo "::error file=tools/build_macos.sh,line=$LINENO::failed (exit $status): $BASH_COMMAND" >&2; exit $status' ERR
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
 PYTHON="${PYTHON:-python3}"
 VENV=".venv-mac"
+
+echo "==> 0/6 Host: $(uname -s) $(uname -m), $("$PYTHON" -V 2>&1)"
 
 echo "==> 1/6 Python environment"
 if [ ! -d "$VENV" ]; then

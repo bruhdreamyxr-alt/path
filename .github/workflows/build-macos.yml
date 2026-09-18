@@ -29,12 +29,33 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.12'   # requirements.txt pins wheels for 3.12
+          # Must match the interpreter the app is developed and tested with
+          # (3.14 locally). The next step proves every pin has a macOS wheel
+          # for whatever version this resolves to.
+          python-version: '3.14'
+
+      - name: Show the build environment
+        run: |
+          echo "macOS:   $(sw_vers -productVersion)   arch: $(uname -m)"
+          echo "Python:  $(python -V 2>&1)   at: $(command -v python)"
+          echo "bash:    $BASH_VERSION"
+          echo "curl:    $(curl --version | head -n1)"
+          echo "unzip:   $(command -v unzip || echo MISSING)"
+          echo "codesign: $(command -v codesign || echo MISSING)"
+          df -h . | tail -n1
+
+      - name: Check every pin has a macOS wheel
+        # Catches an uninstallable pin in about 20 seconds with a short list,
+        # instead of an opaque "Process completed with exit code N" from pip.
+        run: |
+          python tools/check_mac_wheels.py \
+            --python "$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" \
+            --arch "$(uname -m)"
 
       - name: Build .app and .dmg
         run: bash tools/build_macos.sh
@@ -45,7 +66,7 @@ jobs:
           du -sh dist/UniversalAudioStudio.app
 
       - name: Upload the .dmg as a build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: UniversalAudioStudio-macOS-dmg
           path: dist/*.dmg
@@ -53,7 +74,7 @@ jobs:
 
       - name: Attach the .dmg to a Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.dmg
           body: |
