@@ -19,24 +19,22 @@ just download it.
 
 ### Step 1 - Put this folder on GitHub (using the GUI, no command line)
 
-1. Download **GitHub Desktop** from <https://desktop.github.com> and install it.
-2. Open it and sign in. If you don't have an account, choose **Create your free
-   account** and make one.
-3. Menu **File -> Add local repository...**
-4. For the path, paste:
-   `C:\Users\antho\Downloads\scripts\path`
-5. GitHub Desktop will say this folder isn't a Git repository yet - click
-   **create a repository** here.
-6. In the box that appears, leave the name as is and click **Create repository**.
-7. Click **Publish repository** at the top.
-   * Keep **Keep this code private** ticked if you only want to build for
-     yourself - you'll download the `.dmg` and send it to your friend yourself.
-   * Untick it if you want a public download link for your friend.
-8. Click **Publish repository**. The upload takes a few minutes.
+This folder is **already set up as a Git repository**: the GitHub remote is
+configured and three commits are waiting to upload. There is nothing to create -
+you only have to push.
 
-> The `.gitignore` file already in this folder is what makes this upload
-> possible. It excludes the huge Windows `.exe` files - `ffmpeg.exe` alone is
-> 222 MB, and GitHub rejects any single file over 100 MB.
+1. Install **GitHub Desktop** from <https://desktop.github.com> if you don't
+   have it, then open it and sign in as **bruhdreamyxr-alt** (the account that
+   owns the repository).
+2. Menu **File -> Add local repository...**
+3. Paste the path (it is already on your clipboard):
+   `C:\Users\antho\Downloads\scripts\path`
+4. GitHub Desktop lists the repository with **3 commits to push**.
+5. Click **Push origin** at the top. The upload takes a minute or two.
+
+> The `.gitignore` file in this folder is what makes this upload possible. It
+> excludes the huge Windows `.exe` files - `ffmpeg.exe` alone is 222 MB, and
+> GitHub rejects any single file over 100 MB. Only 29 files (~11 MB) are sent.
 
 ### Step 2 - Run the Mac build
 
@@ -113,14 +111,22 @@ After that it launches normally forever. (Terminal alternative:
 * **The in-app updater is disabled on Mac.** It works by replacing a running
   `.exe` and asking for UAC elevation, which is a Windows-only mechanism. On Mac
   the button explains this; updates mean downloading a new `.dmg`.
+* **On Mac, app data lives in `~/Library/Application Support/AudioDownloader`.**
+  History, the download queue, UI preferences and the artwork cache all go
+  there. The app must never write inside its own `.app` bundle: Gatekeeper runs
+  a downloaded app from a read-only translocated copy, and writing into the
+  bundle also invalidates the ad-hoc signature. (`APPDATA` and `LOCALAPPDATA`
+  do not exist on macOS, which is why the lookup needs the macOS branch in
+  `download_queue._user_data_base` / `downloader._user_data_base`.)
 
 ---
 
 ## If the cloud build fails
 
-The workflow and the shell scripts have only been checked by reading them -
-they have never been executed, because that requires a Mac. If the first run
-fails, open the failed step to see the error, and fix or send the log. The most
+The macOS-only steps have never actually been executed - that needs a real Mac.
+The test suite does run as step 3 of the build (48 tests, including simulated
+macOS checks for the data paths above), so a failure there aborts before the
+build. If the first run fails, open the failed step to see the error. The most
 likely culprits:
 
 * a dependency in `requirements.txt` lacking a wheel for the runner's Python,
