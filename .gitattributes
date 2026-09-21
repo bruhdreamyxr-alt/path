@@ -6,5 +6,10 @@
 #   $'\r': command not found
 *.sh text eol=lf
 
+# PowerShell build scripts run on Windows (locally and on the CI runner), where
+# CRLF is native. Bash scripts must stay LF (above); .ps1 files are the mirror
+# image of that rule.
+*.ps1 text eol=crlf
+
 # Binary model/weights data - never normalise or diff these.
 *.bin binary

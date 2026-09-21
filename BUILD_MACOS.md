@@ -42,8 +42,10 @@ only have to push.
 1. Go to <https://github.com> and open your new repository.
 2. Click the **Actions** tab. (If it asks you to enable workflows, click the
    button to enable them.)
-3. In the left sidebar click **Build macOS app**.
+3. In the left sidebar click **Build and release**.
 4. On the right, click **Run workflow** -> then the green **Run workflow** button.
+   This one workflow builds macOS *and* Windows; running it this way publishes
+   nothing, it only produces artifacts.
 5. Wait. It takes about 10-15 minutes. Refresh the page to see progress.
    A green tick means it worked.
 6. Wait for **two** jobs to finish - one per Mac architecture. Click the
@@ -58,8 +60,23 @@ only have to push.
 
 ### Step 3 - Give it to your friend
 
-The `.dmg` is roughly 130 MB. Upload it to Google Drive (the same way you share
-the Windows update zip) and send them the link.
+The easiest route is a **Release**, which turns the build into a permanent public
+download link that needs no GitHub login and never expires:
+
+1. GitHub -> **Releases** -> **Draft a new release**.
+2. In the tag box type `v2.0.0`, then click **Publish release**. The workflow
+   rebuilds everything - Windows included - and attaches the files to it.
+3. Send them the link for their Mac. For example, Apple Silicon:
+
+   ```
+   https://github.com/bruhdreamyxr-alt/path/releases/latest/download/UniversalAudioStudio-2.0.0-arm64.dmg
+   ```
+
+The artifact ZIPs from Step 2 work just as well, but they require a GitHub login
+to download, which your friend almost certainly does not have.
+
+Older Windows copies are moved onto this system by one final update through the
+old Google Drive route; after that Drive is not used at all - see `RELEASE.md`.
 
 Send the file that matches their Mac:
 
@@ -145,7 +162,8 @@ After that it launches normally forever. (Terminal alternative:
   slightly slower, completely fine.
 * **The in-app updater is disabled on Mac.** It works by replacing a running
   `.exe` and asking for UAC elevation, which is a Windows-only mechanism. On Mac
-  the button explains this; updates mean downloading a new `.dmg`.
+  the button explains this; updates mean installing a new `.dmg`. Windows copies,
+  by contrast, update themselves from the newest Release - see `RELEASE.md`.
 * **On Mac, app data lives in `~/Library/Application Support/AudioDownloader`.**
   History, the download queue, UI preferences and the artwork cache all go
   there. The app must never write inside its own `.app` bundle: Gatekeeper runs

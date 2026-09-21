@@ -1,14 +1,13 @@
 """Self-update orchestrator for Universal Audio Studio.
 
-Checks a remote ``update.json`` manifest, compares versions against the one
-in :mod:`version`, downloads the new EXE if available, and launches a small
+Checks the newest published GitHub Release, compares its version against the one
+in :mod:`version`, downloads the new ZIP if available, and launches a small
 updater subprocess that replaces the running EXE while the main app exits.
 """
 
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -19,20 +18,30 @@ from version import __version__ as CURRENT_VERSION
 logger = logging.getLogger("universal_audio_studio.updater")
 
 # ---------------------------------------------------------------------------
-# UPDATE MANIFEST URL - the ONLY thing you have to host yourself.
+# UPDATE SOURCE - GitHub Releases, on the public repository whose Actions build
+# these artifacts.
 #
-# Google Drive setup (files live in folder "106mUGyqs8MTFMhY76eBh_TcrAlLtkKaO"):
-#   update.json  ->  https://drive.google.com/file/d/1XEnyAh2Vq_CRK0_SBjJSrCcXjDQCfPp6/view
-#   app EXE      ->  https://drive.google.com/file/d/12FXG2PP8x5R3ljAmesLehcBaH6QZABnZ/view
+# Nothing is hosted by hand any more. Pushing a tag such as `v2.1.0` makes the
+# release workflow build every platform and attach the assets; this module then
+# reads them back from the public Releases API, which needs no token:
 #
-# The direct-download form below (uc?export=download&id=<FILE_ID>) is what
-# Drive serves to scripts. update.json holds the ZIP file ID in its
-# "download_url" field (see update.json in the repo).
+#     GET https://api.github.com/repos/<owner>/<repo>/releases/latest
+#       -> "tag_name" -> the version to compare against
+#       -> "assets"   -> the one ending in "_update.zip" is the self-update payload
 #
-# To change where updates come from, just replace the ID below with another
-# Drive file ID (or put a plain https:// URL for a normal web server).
+# Replaces an earlier Google Drive manifest (update.json) that had to be edited
+# and re-uploaded by hand for every release, and whose file IDs had to be kept
+# in sync with this file.
+#
+# To point updates at a different repository, change GITHUB_REPO below.
 # ---------------------------------------------------------------------------
-UPDATE_MANIFEST_URL = "https://drive.google.com/uc?export=download&id=1XEnyAh2Vq_CRK0_SBjJSrCcXjDQCfPp6"
+GITHUB_REPO = "bruhdreamyxr-alt/path"
+GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+# The self-update payload is the ZIP produced by _make_update_package.py, named
+# UniversalAudioStudio_<version>_update.zip. Matching on the suffix rather than
+# a full filename means a version bump cannot break the update check.
+UPDATE_ASSET_SUFFIX = "_update.zip"
 
 # How many seconds to wait for the main process to exit before the updater
 # forcibly proceeds with the replacement.
@@ -65,60 +74,48 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def _request_url(url: str, timeout: int = 15, _recursing: bool = False):
+def _request_url(url: str, timeout: int = 15):
     """GET *url* and return a response, or ``None`` on failure.
 
-    Handles Google Drive's interstitial pages ("can't scan this file", large
-    file warnings) by following the embedded download form — usually at
-    ``drive.usercontent.google.com/download`` — with its hidden inputs
-    (``id``/``export``/``confirm``/``uuid``), exactly like a browser does.
+    Redirects are followed automatically, which is what a GitHub release-asset
+    link requires: ``github.com/.../releases/download/<tag>/<file>`` answers
+    with a 302 to an ``objects.githubusercontent.com`` address.
+
+    An HTML body means we did not reach the file we asked for (a proxy block
+    page, or an error document). That case used to be handled by following
+    Google Drive's "can't scan this file for viruses" interstitial form; updates
+    come from GitHub Releases now, so HTML is simply a failure.
     """
     if not url or not url.startswith(("http://", "https://")):
         return None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         resp = urllib.request.urlopen(req, timeout=timeout)
-        ctype = resp.headers.get("Content-Type", "").lower()
-        if "text/html" in ctype:
-            html = resp.read(300_000).decode("utf-8", "replace")
+        if "text/html" in resp.headers.get("Content-Type", "").lower():
             resp.close()
-            if _recursing:
-                # Already followed the form once and still got HTML.
-                return None
-            next_url = _drive_confirm_url(html, url)
-            if not next_url:
-                return None
-            return _request_url(next_url, timeout=timeout, _recursing=True)
+            logger.warning("Expected a file but received an HTML page: %s", url)
+            return None
         return resp
     except Exception as e:
         logger.debug("Request failed: %s", e)
         return None
 
 
-def _drive_confirm_url(html: str, original_url: str):
-    """Extract the real download URL from a Google Drive interstitial page.
-
-    Returns the follow-up URL (with confirmation/``uuid`` params applied) or
-    ``None`` if the page isn't a form we can use.
-    """
-    from urllib.parse import urlencode
-    action = re.search(r"<form[^>]*action=\"([^\"]+)\"", html)
-    fields = {
-        k: v.replace("&amp;", "&")
-        for k, v in re.findall(r'<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"', html)
-    }
-    if not action or not fields.get("id", ""):
-        # Legacy fallback: drive.google.com/uc?...&confirm=<token>
-        confirm = fields.get("confirm")
-        if confirm:
-            sep = "&" if "?" in original_url else "?"
-            return f"{original_url}{sep}confirm={confirm}"
+def _request_json(url: str, timeout: int = 15):
+    """GET *url* and return the decoded JSON, or ``None`` on any failure."""
+    resp = _request_url(url, timeout=timeout)
+    if resp is None:
         return None
-    action_url = action.group(1).replace("&amp;", "&")
-    if action_url.startswith("/"):
-        parsed = original_url.split("/")
-        action_url = f"{parsed[0]}//{parsed[2]}{action_url}"
-    return action_url + "?" + urlencode(fields)
+    try:
+        return json.loads(resp.read(2_000_000).decode("utf-8", "replace"))
+    except Exception as e:
+        logger.debug("Failed to parse JSON from %s: %s", url, e)
+        return None
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
 
 
 def is_newer_version(remote_version):
@@ -126,30 +123,57 @@ def is_newer_version(remote_version):
     return _parse_version(remote_version) > _parse_version(CURRENT_VERSION)
 
 
-def get_remote_update_info():
-    """Fetch update info from the remote manifest URL.
+def _release_version(tag_name):
+    """Turn a release tag into a plain version: ``"v2.1.0"`` -> ``"2.1.0"``.
 
-    Returns a dict with ``version``/``download_url`` on success, or ``None``
-    on any error (network failure, bad JSON, empty response).
+    ``_parse_version`` would strip the ``v`` anyway, but the value is also shown
+    to the user ("Latest: 2.1.0"), so normalise it once here.
     """
-    resp = _request_url(UPDATE_MANIFEST_URL)
-    if resp is None:
+    return str(tag_name or "").strip().lstrip("v").strip()
+
+
+def _pick_update_asset(assets, suffix=UPDATE_ASSET_SUFFIX):
+    """Return the download URL of the first asset whose name ends with *suffix*.
+
+    A Release also carries the two .dmg files and the installer, so the suffix
+    is what selects the self-update ZIP from among them.
+    """
+    for asset in assets or []:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name", "")).lower()
+        url = str(asset.get("browser_download_url", "")).strip()
+        if name.endswith(suffix) and url:
+            return url
+    return None
+
+
+def get_remote_update_info():
+    """Fetch the newest published Release from the GitHub API.
+
+    Returns a dict with ``version``/``download_url`` on success, or ``None`` on
+    any error: offline, rate limited, no release published yet, or a release
+    with no self-update ZIP attached (a *draft* release has no downloadable
+    assets, which is another reason releases must be published).
+
+    This is the unauthenticated public endpoint, so no token ships inside the
+    app. It allows 60 requests per hour per address, far more than an app that
+    checks once at startup needs.
+    """
+    data = _request_json(GITHUB_RELEASES_API)
+    if not isinstance(data, dict):
+        logger.warning("Could not read releases from %s", GITHUB_RELEASES_API)
         return None
-    try:
-        data = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        logger.debug("Failed to parse update manifest: %s", e)
-        return None
-    finally:
-        try:
-            resp.close()
-        except Exception:
-            pass
-    version = str(data.get("version", "")).strip()
-    download_url = str(data.get("download_url", "")).strip()
+
+    version = _release_version(data.get("tag_name"))
+    download_url = _pick_update_asset(data.get("assets"))
     if version and download_url:
         return {"version": version, "download_url": download_url}
-    logger.warning("Manifest missing version/download_url: %s", data)
+
+    logger.warning(
+        "Release %s has no '%s' asset, so there is nothing to update to.",
+        data.get("tag_name") or "(unknown tag)", UPDATE_ASSET_SUFFIX,
+    )
     return None
 
 

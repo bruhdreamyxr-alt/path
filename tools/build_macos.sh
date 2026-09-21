@@ -10,7 +10,7 @@
 #        architecture cloud build produces one of each)
 #
 # PyInstaller cannot cross-compile, so this must run on a Mac (or a macOS CI
-# runner - see .github/workflows/build-macos.yml, which produces the .dmg for
+# runner - see .github/workflows/release.yml, which produces the .dmg for
 # you without needing a Mac).
 set -euo pipefail
 
