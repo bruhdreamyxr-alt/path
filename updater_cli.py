@@ -92,16 +92,53 @@ def _self_elevate_and_exit():
     sys.exit(4)
 
 
-def _extract_zip_into(package_path: str, app_dir: str):
+def _copy_member(zf, member, target):
+    """Write one zip member to *target*. Return an error string, or ``None``.
+
+    A short write is treated as a failure: a truncated DLL or EXE would leave
+    an app that cannot start, and that is far worse than retrying.
+    """
+    try:
+        with zf.open(member) as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    except (PermissionError, OSError) as e:
+        return str(e)
+
+    try:
+        written = os.path.getsize(target)
+    except OSError as e:
+        return str(e)
+    if member.file_size and written != member.file_size:
+        return f"short write ({written} of {member.file_size} bytes)"
+    return None
+
+
+def _extract_zip_into(package_path: str, app_dir: str, retry_seconds: int = 120):
     """Extract a release ZIP over *app_dir*, replacing files in place.
 
-    Refuses to write any member outside *app_dir* (zip-slip guard). Retries
-    briefly on locked files (e.g. the still-running exe on some systems).
+    Refuses to write any member outside *app_dir* (zip-slip guard).
+
+    Returns True only when every member was written and verified.
+
+    Locked files are the normal case, not an exceptional one: the previous
+    process may still be releasing its DLLs, and virus scanners routinely hold
+    a freshly written binary for a few seconds. So a file that cannot be
+    written is set aside and everything else still gets installed; the failures
+    are then retried for up to *retry_seconds*.
+
+    An earlier version gave a file five one-second attempts and then called
+    sys.exit, which abandoned the entire rest of the package. In the wild that
+    left an app with a new main EXE but the old _internal beside it - and if the
+    lock had landed one file later, with a new _tkinter.pyd and no matching
+    tcl90.dll, the app would not have started at all.
     """
     app_dir = os.path.normpath(os.path.abspath(app_dir))
     with zipfile.ZipFile(package_path, "r") as zf:
         members = zf.infolist()
         _log(f"Installing {len(members)} package entries into {app_dir}")
+
+        written = 0
+        pending = []
         for member in members:
             target = os.path.normpath(os.path.join(app_dir, member.filename))
             if target != app_dir and not target.startswith(app_dir + os.sep):
@@ -111,17 +148,40 @@ def _extract_zip_into(package_path: str, app_dir: str):
                 os.makedirs(target, exist_ok=True)
                 continue
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            for attempt in range(5):
-                try:
-                    with zf.open(member) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                    break
-                except (PermissionError, OSError) as e:
-                    _log(f"Extract attempt {attempt + 1} failed for {member.filename}: {e}")
-                    time.sleep(1)
+
+            error = _copy_member(zf, member, target)
+            if error is None:
+                written += 1
             else:
-                _log(f"ERROR: Could not write {member.filename}")
-                sys.exit(2)
+                # Keep going: one locked file must not stop the other 160.
+                _log(f"Locked, will retry: {member.filename} ({error})")
+                pending.append((member, target, error))
+
+        deadline = time.time() + max(0, retry_seconds)
+        pass_number = 0
+        while pending and time.time() < deadline:
+            pass_number += 1
+            time.sleep(1)
+            still_pending = []
+            for member, target, error in pending:
+                new_error = _copy_member(zf, member, target)
+                if new_error is None:
+                    written += 1
+                    _log(f"Retry pass {pass_number}: wrote {member.filename}")
+                else:
+                    still_pending.append((member, target, new_error))
+            if still_pending:
+                _log(f"Retry pass {pass_number}: {len(still_pending)} file(s) still locked")
+            pending = still_pending
+
+        if pending:
+            for member, target, error in pending:
+                _log(f"ERROR: could not write {member.filename}: {error}")
+            _log(f"UPDATE INCOMPLETE: {written} written, {len(pending)} failed")
+            return False
+
+    _log(f"All {written} files written and verified")
+    return True
 
 
 def _wait_for_process_exit(pid, timeout=10):
@@ -218,24 +278,36 @@ def main():
     time.sleep(1)
     _wait_for_process_exit(parent_pid, timeout=10)
 
+    update_complete = True
     if zipfile.is_zipfile(new_package):
         _log("Installing full update package...")
-        _extract_zip_into(new_package, app_dir)
+        update_complete = _extract_zip_into(new_package, app_dir)
     else:
-        # Single-EXE replacement (works for onefile builds).
+        # Single-EXE replacement (works for onefile builds). Same patience as
+        # the package path: a locked EXE is usually a release delay, not a
+        # permanent failure.
         _log("Installing single-EXE update...")
-        for attempt in range(5):
+        update_complete = False
+        deadline = time.time() + 120
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
             try:
                 shutil.move(new_package, old_exe)
+                update_complete = True
                 break
             except (PermissionError, OSError) as e:
-                _log(f"Replace attempt {attempt + 1} failed: {e}")
-                time.sleep(1)
-        else:
-            _log("ERROR: Could not replace the application EXE.")
-            sys.exit(2)
+                _log(f"Replace attempt {attempt} failed: {e}")
+                time.sleep(2)
 
-    _log("Update installed successfully.")
+    if update_complete:
+        _log("Update installed successfully.")
+    else:
+        # Relaunch anyway: a partly written install usually still runs, and
+        # leaving the user with nothing to click would be worse. The log is the
+        # record, and running the installer is the repair.
+        _log("UPDATE INCOMPLETE - relaunching anyway. If the app does not start, "
+             "run the installer again.")
 
     if restart_exe:
         if _relaunch_app(restart_exe, restart_args):
@@ -244,6 +316,8 @@ def main():
             sys.exit(3)
 
     _log("updater_cli finished OK.")
+    if not update_complete:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

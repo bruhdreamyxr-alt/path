@@ -64,12 +64,12 @@ The easiest route is a **Release**, which turns the build into a permanent publi
 download link that needs no GitHub login and never expires:
 
 1. GitHub -> **Releases** -> **Draft a new release**.
-2. In the tag box type `v2.0.0`, then click **Publish release**. The workflow
+2. In the tag box type `v2.1.1` (it must match the version in `version.py`), then click **Publish release**. The workflow
    rebuilds everything - Windows included - and attaches the files to it.
 3. Send them the link for their Mac. For example, Apple Silicon:
 
    ```
-   https://github.com/bruhdreamyxr-alt/path/releases/latest/download/UniversalAudioStudio-2.0.0-arm64.dmg
+   https://github.com/bruhdreamyxr-alt/path/releases/latest/download/UniversalAudioStudio-2.1.1-arm64.dmg
    ```
 
 The artifact ZIPs from Step 2 work just as well, but they require a GitHub login

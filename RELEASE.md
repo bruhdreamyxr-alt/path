@@ -90,10 +90,16 @@ link and the new app is dragged over the old one in Applications.
 
 This is the main known gap - see below.
 
-## Retiring Google Drive: the one transition release
+## Retiring Google Drive - done, for the record
 
-Version **2.1.0** is the hand-over. It is built with the GitHub updater inside it,
-and it reaches the old copies through the mechanism they already understand.
+**This has already happened.** 2.1.0 was the hand-over release: it shipped with
+the GitHub updater inside it and reached the old copies through the mechanism they
+already understood. Releases from 2.1.1 onward need none of this - just tag and
+publish, as described at the top of this file.
+
+One thing to keep: **leave `update.json` on Drive.** A copy still on 2.0.0 that
+has not been launched since the hop needs it to make the jump, and deleting it
+would strand that copy on 2.0.0 permanently. It costs nothing to keep.
 
 ### Why almost nothing gets uploaded
 
