@@ -7,4 +7,4 @@
 # aborts the install partway, and the package writes the updater first so a
 # partial update still leaves the fixed one behind.
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"

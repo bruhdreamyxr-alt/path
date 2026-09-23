@@ -40,7 +40,7 @@ def _force_remove(path):
     """rmtree that copes with read-only files (they cannot be deleted as-is)."""
     def on_error(func, target, _exc):
         try:
-            os.chmod(target, stat.S_IWRITE)
+            os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
             func(target)
         except OSError:
             pass
@@ -91,7 +91,12 @@ class UpdaterCliTestCase(unittest.TestCase):
         os.chmod(os.path.join(self.app_dir, relative), stat.S_IREAD)
 
     def unlock(self, relative):
-        os.chmod(os.path.join(self.app_dir, relative), stat.S_IWRITE)
+        # Read *and* write. On POSIX, S_IWRITE alone is 0o200 - write-only - so
+        # the assertions that read the file back would fail with EACCES even on
+        # a healthy machine. Windows only uses S_IWRITE to clear the read-only
+        # attribute, which is why this passed locally and failed on macOS.
+        os.chmod(os.path.join(self.app_dir, relative),
+                 stat.S_IREAD | stat.S_IWRITE)
 
 
 class CopyMemberTests(UpdaterCliTestCase):

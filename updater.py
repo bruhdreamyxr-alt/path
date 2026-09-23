@@ -8,6 +8,7 @@ updater subprocess that replaces the running EXE while the main app exits.
 import json
 import logging
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -38,10 +39,37 @@ logger = logging.getLogger("universal_audio_studio.updater")
 GITHUB_REPO = "bruhdreamyxr-alt/path"
 GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
+# Used only as a fallback, when the newest Release carries no self-update ZIP.
+GITHUB_RELEASES_LIST_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=10"
+
 # The self-update payload is the ZIP produced by _make_update_package.py, named
 # UniversalAudioStudio_<version>_update.zip. Matching on the suffix rather than
 # a full filename means a version bump cannot break the update check.
 UPDATE_ASSET_SUFFIX = "_update.zip"
+
+# ---------------------------------------------------------------------------
+# macOS: detection only
+#
+# A Mac cannot replace its own .app the way updater_cli.exe replaces a Windows
+# .exe, so on macOS the app reports a new version and points the user at the
+# download instead of pretending it can install it. The workflow names the disk
+# images with the version and architecture, so the right one can be picked out
+# of a Release.
+# ---------------------------------------------------------------------------
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+MACOS_DMG_SUFFIXES = {
+    "arm64": "-arm64.dmg",
+    "x86_64": "-x86_64.dmg",
+}
+
+# platform.machine() spells the same architecture differently per system.
+_ARCH_ALIASES = {
+    "arm64": "arm64",
+    "aarch64": "arm64",
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+}
 
 # How many seconds to wait for the main process to exit before the updater
 # forcibly proceeds with the replacement.
@@ -148,32 +176,125 @@ def _pick_update_asset(assets, suffix=UPDATE_ASSET_SUFFIX):
     return None
 
 
-def get_remote_update_info():
-    """Fetch the newest published Release from the GitHub API.
+def _parse_release(data):
+    """Turn one GitHub release object into the dict this module uses.
 
-    Returns a dict with ``version``/``download_url`` on success, or ``None`` on
-    any error: offline, rate limited, no release published yet, or a release
-    with no self-update ZIP attached (a *draft* release has no downloadable
-    assets, which is another reason releases must be published).
-
-    This is the unauthenticated public endpoint, so no token ships inside the
-    app. It allows 60 requests per hour per address, far more than an app that
-    checks once at startup needs.
+    Returns ``None`` for anything without a usable tag, so a malformed response
+    cannot be mistaken for a real Release.
     """
-    data = _request_json(GITHUB_RELEASES_API)
     if not isinstance(data, dict):
-        logger.warning("Could not read releases from %s", GITHUB_RELEASES_API)
         return None
 
     version = _release_version(data.get("tag_name"))
-    download_url = _pick_update_asset(data.get("assets"))
-    if version and download_url:
-        return {"version": version, "download_url": download_url}
+    if not version:
+        return None
+
+    assets = {}
+    for asset in data.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name", "")).strip()
+        url = str(asset.get("browser_download_url", "")).strip()
+        if name and url:
+            assets[name] = url
+
+    return {
+        "version": version,
+        "download_url": _pick_update_asset(data.get("assets")),
+        "assets": assets,
+    }
+
+
+def get_remote_release(require_update_package=False):
+    """Return the newest published Release, or ``None``.
+
+    ``{"version": "2.1.2",
+       "download_url": <URL of the self-update ZIP, or None>,
+       "assets": {<asset name>: <URL>, ...}}``
+
+    With *require_update_package*, the newest Release is only accepted when it
+    actually carries the self-update ZIP; otherwise older Releases are searched
+    and the newest usable one is returned.
+
+    That fallback matters more than it looks. Publishing creates a Release
+    immediately, but the files are attached minutes later by the build - and if
+    that build fails, the newest Release stays empty for good, exactly as v2.1.1
+    did. Without this, every installed copy checked, found no update package in
+    the newest Release, and reported "no update information available" even
+    though the previous Release was perfectly usable. A failed release must not
+    be able to wedge everybody's updater.
+
+    Returns ``None`` on any error: offline, rate limited, nothing published yet,
+    or a malformed response. This is the unauthenticated public endpoint, so no
+    token ships inside the app; it allows 60 requests an hour per address, far
+    more than an app checking once a day needs.
+    """
+    release = _parse_release(_request_json(GITHUB_RELEASES_API))
+    if release is None:
+        logger.warning("Could not read a usable release from %s", GITHUB_RELEASES_API)
+        return None
+    if release["download_url"] or not require_update_package:
+        return release
 
     logger.warning(
-        "Release %s has no '%s' asset, so there is nothing to update to.",
-        data.get("tag_name") or "(unknown tag)", UPDATE_ASSET_SUFFIX,
+        "Newest release %s carries no '%s' - looking further back",
+        release["version"], UPDATE_ASSET_SUFFIX,
     )
+    listing = _request_json(GITHUB_RELEASES_LIST_API)
+    if not isinstance(listing, list):
+        return None
+    for item in listing:
+        # The list endpoint includes pre-releases and (for a token) drafts;
+        # /releases/latest deliberately excludes both, so this must too.
+        if not isinstance(item, dict) or item.get("prerelease") or item.get("draft"):
+            continue
+        candidate = _parse_release(item)
+        if candidate and candidate["download_url"]:
+            logger.info("Falling back to release %s", candidate["version"])
+            return candidate
+
+    logger.warning("No published release carries a '%s' asset", UPDATE_ASSET_SUFFIX)
+    return None
+
+
+def macos_arch(machine=None):
+    """Normalise an architecture name to ``arm64``, ``x86_64``, or ``None``."""
+    if machine is None:
+        machine = platform.machine()
+    return _ARCH_ALIASES.get(str(machine).strip().lower())
+
+
+def macos_download_url(release, machine=None):
+    """Return the ``.dmg`` URL for this Mac from *release*, or ``None``.
+
+    The workflow names disk images ``UniversalAudioStudio-<version>-<arch>.dmg``,
+    so both parts are matched: handing someone a different architecture's build
+    would produce an app that cannot run, and a *stale* version's image would be
+    worse than no download at all.
+    """
+    if not release:
+        return None
+    suffix = MACOS_DMG_SUFFIXES.get(macos_arch(machine))
+    if not suffix:
+        return None
+
+    version = str(release.get("version", ""))
+    for name, url in (release.get("assets") or {}).items():
+        if name.lower().endswith(suffix) and (not version or version in name):
+            return url
+    return None
+
+
+def get_remote_update_info():
+    """The newest *usable* Release, as ``{"version", "download_url"}``.
+
+    The Windows self-update needs the ZIP, so releases without one are skipped in
+    favour of an older release that has it (see :func:`get_remote_release`).
+    """
+    release = get_remote_release(require_update_package=True)
+    if release and release.get("download_url"):
+        return {"version": release["version"],
+                "download_url": release["download_url"]}
     return None
 
 

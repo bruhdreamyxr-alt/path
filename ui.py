@@ -1652,12 +1652,9 @@ class UniversalAudioStudio(ctk.CTk):
             return
 
         if not updater.self_update_supported():
-            messagebox.showinfo(
-                "Update Unavailable",
-                "App self-update is only available in the Windows build.\n\n"
-                "On macOS, download the newest .dmg and replace "
-                "UniversalAudioStudio.app with the new copy.",
-            )
+            # macOS: the app cannot replace itself here, but it can still report
+            # that a newer version exists and take the user to the download.
+            self._check_macos_update()
             return
 
         self.app_update_btn.configure(state="disabled", text="Checking...")
@@ -1754,6 +1751,76 @@ class UniversalAudioStudio(ctk.CTk):
         self._start_worker(worker)
 
 
+    def _check_macos_update(self):
+        """macOS update check: report a new version and offer the download.
+
+        A Mac cannot replace its own .app while it is running, so there is no
+        install step here - the user is taken to the disk image instead. Without
+        this the button did nothing but explain that self-update is
+        Windows-only, so Mac users were never told an update existed.
+        """
+        import updater  # local module
+        from version import __version__ as local_ver
+
+        self.app_update_btn.configure(state="disabled", text="Checking...")
+        self.update_dl_status("Checking for app updates...", "#3498db")
+
+        def worker():
+            try:
+                release = updater.get_remote_release()
+            except Exception:
+                release = None
+            self.after(0, lambda: self._after_macos_update_check(release, local_ver))
+
+        self._start_worker(worker)
+
+    def _after_macos_update_check(self, release, local_ver):
+        """Show the result of the macOS update check."""
+        import updater  # local module
+
+        self.app_update_btn.configure(state="normal", text="↻ Check for App Updates")
+        remote_ver = (release or {}).get("version")
+        if not remote_ver:
+            self.update_dl_status("Could not reach update server.", "#e74c3c")
+            messagebox.showinfo("Update Check",
+                                "No update information available right now.")
+            return
+        if not updater.is_newer_version(remote_ver):
+            self.update_dl_status(f"Up to date (v{local_ver}).", "#27ae60")
+            messagebox.showinfo("Up to Date",
+                                f"You already have the latest version ({local_ver}).\n"
+                                "No update needed.")
+            return
+        self.update_dl_status(f"Update available (v{remote_ver}).", "#f39c12")
+        self._offer_macos_download(local_ver, release)
+
+    def _offer_macos_download(self, local_ver, release):
+        """Offer to open the new .dmg in the browser (macOS)."""
+        import updater  # local module
+        import webbrowser
+
+        remote_ver = (release or {}).get("version", "?")
+        # The direct disk image when the Release has one for this Mac, otherwise
+        # the Release page, so the user is never left without a route.
+        target = updater.macos_download_url(release) or updater.RELEASES_PAGE
+
+        if messagebox.askyesno(
+            "Update Available",
+            f"A new version is available:\n\n"
+            f"  Current: {local_ver}\n"
+            f"  Latest:  {remote_ver}\n\n"
+            f"A Mac cannot replace the app while it is running, so this opens "
+            f"the download in your browser.\n"
+            f"Then drag the new app over the old one in Applications.\n\n"
+            f"Open the download now?",
+        ):
+            try:
+                webbrowser.open(target)
+                self.update_dl_status(f"Opened the download for v{remote_ver}.", "#27ae60")
+            except Exception as e:
+                logger.warning("Could not open a browser: %s", e)
+                messagebox.showinfo("Update Available", f"Download it here:\n\n{target}")
+
     def _check_updates_on_startup(self):
         """Quiet startup auto-check: only prompts if a newer version exists.
 
@@ -1775,16 +1842,19 @@ class UniversalAudioStudio(ctk.CTk):
                 if not updater.is_frozen():
                     return
 
-                info = updater.get_remote_update_info()
-                if not info or not info.get("version") or not info.get("download_url"):
+                release = updater.get_remote_release()
+                if not release or not release.get("version"):
                     return
 
-                if not updater.is_newer_version(info["version"]):
+                if not updater.is_newer_version(release["version"]):
+                    return
+                # Windows installs from the packaged ZIP, so without it there is
+                # nothing to offer. A Mac only needs the version and a disk image.
+                if updater.self_update_supported() and not release.get("download_url"):
                     return
                 download_queue._mark_update_check_done('app')
 
-                remote_ver = info["version"]
-                self.after(0, lambda: self._offer_startup_update(local_ver, remote_ver))
+                self.after(0, lambda: self._offer_startup_update(local_ver, release))
             except Exception:
                 # Never let a background update check crash the app on startup.
                 pass
@@ -1792,8 +1862,19 @@ class UniversalAudioStudio(ctk.CTk):
         threading.Thread(target=_runner, daemon=True).start()
 
 
-    def _offer_startup_update(self, local_ver, remote_ver):
+    def _offer_startup_update(self, local_ver, release):
         """Show the 'update available' prompt found by the startup check."""
+        import updater  # local module
+
+        remote_ver = (release or {}).get("version", "?")
+        if not updater.self_update_supported():
+            # macOS: the dialog below promises a Windows UAC prompt and an
+            # automatic relaunch, neither of which exists here, so offer the
+            # download instead.
+            self.update_dl_status(f"Update available (v{remote_ver}).", "#f39c12")
+            self._offer_macos_download(local_ver, release)
+            return
+
         msg = (
             f"A new version is available:\n\n"
             f"  Current: {local_ver}\n"

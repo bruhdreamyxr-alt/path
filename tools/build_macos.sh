@@ -42,10 +42,24 @@ bash tools/fetch_mac_helpers.sh
 
 echo
 echo "==> 3/6 Running test suite"
-python -m unittest discover -s tests || {
+# Capture the output rather than streaming it: on failure the failing test names
+# are printed both in this log and as annotations, so the run page says which
+# test broke.
+#
+# This block used to be `python -m unittest ... || { echo ...; exit 1; }`, and an
+# explicit `exit` does NOT trip the ERR trap above - so a failed suite produced
+# nothing but "Process completed with exit code 1" with no indication of the
+# cause. That is exactly what happened on the v2.1.1 run.
+TESTS_LOG="$(mktemp)"
+if ! python -m unittest discover -s tests >"$TESTS_LOG" 2>&1; then
+  grep -E '^(FAIL|ERROR):' "$TESTS_LOG" | sed 's|^|::error file=tools/build_macos.sh::|' || true
   echo "!! Tests failed. Fix them before shipping a build." >&2
+  tail -n 40 "$TESTS_LOG" >&2
+  rm -f "$TESTS_LOG"
   exit 1
-}
+fi
+tail -n 3 "$TESTS_LOG"
+rm -f "$TESTS_LOG"
 
 echo
 echo "==> 4/6 Building .app"

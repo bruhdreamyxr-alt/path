@@ -33,6 +33,10 @@ def _release_payload(tag="v2.1.0", assets=None):
                 "browser_download_url": "https://example.invalid/arm64.dmg",
             },
             {
+                "name": "UniversalAudioStudio-2.1.0-x86_64.dmg",
+                "browser_download_url": "https://example.invalid/x86_64.dmg",
+            },
+            {
                 "name": _UPDATE_ASSET,
                 "browser_download_url": "https://example.invalid/update.zip",
             },
@@ -297,6 +301,196 @@ class WindowsToolingTests(unittest.TestCase):
         app = script.index("'UniversalAudioStudio.spec', '-y'")
         self.assertLess(helper, app,
                         "updater_cli.exe must be built before the app spec runs.")
+
+
+class MacosUpdateDetectionTests(unittest.TestCase):
+    """macOS cannot self-update, so it points at the .dmg instead.
+
+    Until now the Mac button only said self-update is Windows-only, and the
+    startup check offered an install that promised a UAC prompt which cannot
+    exist on a Mac - so a Mac user was never told an update was available.
+    """
+
+    ASSETS = {
+        "UniversalAudioStudio-2.1.1-arm64.dmg": "https://x/arm64",
+        "UniversalAudioStudio-2.1.1-x86_64.dmg": "https://x/intel",
+        "UniversalAudioStudio_2.1.1_update.zip": "https://x/zip",
+        "mysetup211.exe": "https://x/exe",
+    }
+
+    def _release(self, version="2.1.1"):
+        return {"version": version,
+                "download_url": self.ASSETS["UniversalAudioStudio_2.1.1_update.zip"],
+                "assets": dict(self.ASSETS)}
+
+    def test_apple_silicon_gets_the_arm64_image(self):
+        self.assertEqual(updater.macos_download_url(self._release(), "arm64"),
+                         "https://x/arm64")
+
+    def test_intel_gets_the_x86_64_image(self):
+        self.assertEqual(updater.macos_download_url(self._release(), "x86_64"),
+                         "https://x/intel")
+
+    def test_architecture_aliases_are_understood(self):
+        for alias in ("ARM64", "aarch64", " arm64 "):
+            self.assertEqual(updater.macos_arch(alias), "arm64", alias)
+        for alias in ("x86_64", "AMD64"):
+            self.assertEqual(updater.macos_arch(alias), "x86_64", alias)
+
+    def test_an_unknown_architecture_gets_no_download(self):
+        """Better to send them to the Release page than the wrong binary."""
+        self.assertIsNone(updater.macos_arch("mips"))
+        self.assertIsNone(updater.macos_download_url(self._release(), "mips"))
+
+    def test_an_image_from_another_version_is_never_offered(self):
+        release = {"version": "2.2.0", "download_url": None,
+                   "assets": {"UniversalAudioStudio-2.1.1-arm64.dmg": "https://x/old"}}
+        self.assertIsNone(updater.macos_download_url(release, "arm64"))
+
+    def test_a_release_with_no_disk_image(self):
+        release = {"version": "2.1.1", "download_url": "https://x/zip", "assets": {}}
+        self.assertIsNone(updater.macos_download_url(release, "arm64"))
+
+    def test_a_missing_release_is_survivable(self):
+        for release in (None, {}, {"version": ""}):
+            self.assertIsNone(updater.macos_download_url(release, "arm64"))
+
+    def test_there_is_always_a_fallback_page(self):
+        self.assertIn("github.com", updater.RELEASES_PAGE)
+        self.assertTrue(updater.RELEASES_PAGE.endswith("/releases/latest"))
+
+
+class RemoteReleaseTests(unittest.TestCase):
+    """get_remote_release() feeds the macOS path; Windows uses the ZIP only."""
+
+    def test_exposes_every_asset_by_name(self):
+        with mock.patch.object(updater, "_request_json",
+                               return_value=_release_payload()):
+            release = updater.get_remote_release()
+        self.assertEqual(release["version"], "2.1.0")
+        self.assertIn("UniversalAudioStudio-2.1.0-arm64.dmg", release["assets"])
+        self.assertIn("UniversalAudioStudio-2.1.0-x86_64.dmg", release["assets"])
+        # The self-update payload is chosen by the asset's *name* (the fixture's
+        # URLs are deliberately not the real filenames), which is what has to
+        # keep the suffix.
+        self.assertEqual(release["download_url"], "https://example.invalid/update.zip")
+        self.assertTrue(_UPDATE_ASSET.endswith(updater.UPDATE_ASSET_SUFFIX))
+
+    def test_a_release_without_the_zip_still_yields_a_version(self):
+        """Windows cannot use it; a Mac only needs the version and a disk image."""
+        payload = _release_payload(assets=[
+            {"name": "UniversalAudioStudio-2.1.0-arm64.dmg",
+             "browser_download_url": "https://example.invalid/arm64.dmg"},
+        ])
+        with mock.patch.object(updater, "_request_json", return_value=payload):
+            release = updater.get_remote_release()
+            self.assertEqual(release["version"], "2.1.0")
+            self.assertIsNone(release["download_url"])
+            self.assertIsNone(updater.get_remote_update_info())
+
+    def test_returns_none_instead_of_raising(self):
+        for payload in (None, [], "html", 7, {}, {"tag_name": ""}):
+            with self.subTest(payload=payload):
+                with mock.patch.object(updater, "_request_json",
+                                       return_value=payload):
+                    self.assertIsNone(updater.get_remote_release())
+
+    def test_malformed_assets_are_skipped(self):
+        payload = _release_payload(assets=[
+            "not-a-dict",
+            {"name": "", "browser_download_url": "https://x"},
+            {"name": "no-url.dmg"},
+            {"name": "good_2.1.0_update.zip", "browser_download_url": "https://x/ok"},
+        ])
+        with mock.patch.object(updater, "_request_json", return_value=payload):
+            release = updater.get_remote_release()
+        self.assertEqual(release["assets"], {"good_2.1.0_update.zip": "https://x/ok"})
+        self.assertEqual(release["download_url"], "https://x/ok")
+
+
+class MacUiWiringTests(unittest.TestCase):
+    """Guards on ui.py, which needs a live Tk window to exercise properly."""
+
+    def test_the_dead_end_message_is_gone(self):
+        self.assertNotIn(
+            "App self-update is only available in the Windows build",
+            _read("ui.py"),
+            "the macOS button must report updates now, not just explain itself",
+        )
+
+    def test_the_mac_flow_exists_and_opens_the_download(self):
+        source = _read("ui.py")
+        self.assertIn("_check_macos_update", source)
+        self.assertIn("_after_macos_update_check", source)
+        self.assertIn("_offer_macos_download", source)
+        self.assertIn("webbrowser.open", source)
+
+    def test_the_startup_prompt_knows_the_platform(self):
+        source = _read("ui.py")
+        self.assertIn("def _offer_startup_update(self, local_ver, release)", source)
+        self.assertIn("updater.macos_download_url", source)
+        self.assertIn("updater.RELEASES_PAGE", source)
+
+
+class FallbackToAnOlderReleaseTests(unittest.TestCase):
+    """A Release exists before its files do.
+
+    Publishing creates the Release immediately; the build attaches the files
+    minutes later. When that build fails, the newest Release stays empty for good
+    - which is what happened to v2.1.1, after which every installed copy reported
+    "no update information available" even though 2.1.0 was perfectly usable.
+    """
+
+    EMPTY_LATEST = {"tag_name": "v2.1.1", "assets": []}
+
+    def _fake_requests(self, latest, listing):
+        def fake(url, timeout=15):
+            return listing if url == updater.GITHUB_RELEASES_LIST_API else latest
+        return fake
+
+    def test_falls_back_to_the_newest_release_that_has_the_package(self):
+        with mock.patch.object(
+                updater, "_request_json",
+                side_effect=self._fake_requests(
+                    self.EMPTY_LATEST,
+                    [self.EMPTY_LATEST, _release_payload(tag="v2.1.0")])):
+            info = updater.get_remote_update_info()
+        self.assertEqual(info["version"], "2.1.0")
+        self.assertEqual(info["download_url"], "https://example.invalid/update.zip")
+
+    def test_a_usable_newest_release_needs_no_second_request(self):
+        """The fallback must not add a request to the normal happy path."""
+        with mock.patch.object(updater, "_request_json",
+                               return_value=_release_payload()) as request:
+            updater.get_remote_update_info()
+        self.assertEqual(request.call_count, 1)
+
+    def test_pre_releases_are_not_used_as_a_fallback(self):
+        """`releases/latest` skips them, so the fallback must agree."""
+        with mock.patch.object(
+                updater, "_request_json",
+                side_effect=self._fake_requests(
+                    self.EMPTY_LATEST,
+                    [{"tag_name": "v2.2.0", "prerelease": True,
+                      "assets": [{"name": "UniversalAudioStudio_2.2.0_update.zip",
+                                  "browser_download_url": "https://x/pre"}]}])):
+            self.assertIsNone(updater.get_remote_update_info())
+
+    def test_nothing_usable_anywhere_is_reported_as_such(self):
+        with mock.patch.object(
+                updater, "_request_json",
+                side_effect=self._fake_requests(
+                    self.EMPTY_LATEST, [self.EMPTY_LATEST, "junk"])):
+            self.assertIsNone(updater.get_remote_update_info())
+
+    def test_the_macos_path_still_accepts_an_empty_release(self):
+        """A Mac only needs the version, so it must not pay for a fallback."""
+        with mock.patch.object(updater, "_request_json",
+                               return_value=self.EMPTY_LATEST) as request:
+            release = updater.get_remote_release()
+        self.assertEqual(release["version"], "2.1.1")
+        self.assertIsNone(release["download_url"])
+        self.assertEqual(request.call_count, 1)
 
 
 if __name__ == "__main__":
