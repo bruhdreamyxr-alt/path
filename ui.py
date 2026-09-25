@@ -425,6 +425,7 @@ class UniversalAudioStudio(ctk.CTk):
             "audio_format": "mp3_vbr",
             "filename_template": "",
             "window_geometry": "",
+            "window_maximized": False,
         }
 
     def _load_prefs(self) -> dict:
@@ -464,8 +465,17 @@ class UniversalAudioStudio(ctk.CTk):
     def _remember_window_geometry(self) -> None:
         """Persist the current window size/position for the next launch."""
         try:
-            if str(self.state()) != "normal":
+            st = str(self.state())
+            if st == "zoomed":
+                # Maximized: keep the last normal-size geometry (this one is
+                # the screen size) but remember to re-maximize on restore.
+                self._set_pref("window_maximized", True)
                 return
+            if st != "normal":
+                # Minimized/iconic: neither value is trustworthy here; keep
+                # whatever the last known-good save recorded.
+                return
+            self._set_pref("window_maximized", False)
             geo = str(self.geometry() or "")
             if re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", geo):
                 self._set_pref("window_geometry", geo)
@@ -473,31 +483,39 @@ class UniversalAudioStudio(ctk.CTk):
             pass
 
     def _restore_window_geometry(self) -> None:
-        """Reapply the saved window geometry when it still fits a screen."""
+        """Reapply the saved window geometry when it still fits a screen.
+
+        Also re-maximizes the window when it was closed that way: the state()
+        read happens while the window is still withdrawn (before deiconify),
+        and Tk applies the zoomed state when the window maps.
+        """
         geo = str(self._prefs.get("window_geometry", "") or "").strip()
         m = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geo)
-        if not m:
-            return
-        # Clamp to the window's own minimum so a stale tiny geometry can't
-        # make the app unusable (minsize(800, 680) in __init__).
-        w = max(int(m.group(1)), 800)
-        h = max(int(m.group(2)), 680)
-        x = int(m.group(3))
-        y = int(m.group(4))
-        try:
-            sw = self.winfo_screenwidth()
-            sh = self.winfo_screenheight()
-        except Exception:
-            return
-        # Skip the restore when the saved frame is fully off every attached
-        # screen (monitor unplugged since last run): Tk would place it there
-        # anyway and the window would be unreachable.
-        if x >= sw or y >= sh or x + w <= 0 or y + h <= 0:
-            return
-        try:
-            self.geometry(f"{w}x{h}{m.group(3)}{m.group(4)}")
-        except Exception:
-            pass
+        if m:
+            # Clamp to the window's own minimum so a stale tiny geometry can't
+            # make the app unusable (minsize(800, 680) in __init__).
+            w = max(int(m.group(1)), 800)
+            h = max(int(m.group(2)), 680)
+            x = int(m.group(3))
+            y = int(m.group(4))
+            try:
+                sw = self.winfo_screenwidth()
+                sh = self.winfo_screenheight()
+            except Exception:
+                sw = sh = 0
+            # Skip the restore when the saved frame is fully off every attached
+            # screen (monitor unplugged since last run): Tk would place it there
+            # anyway and the window would be unreachable.
+            if sw and sh and not (x >= sw or y >= sh or x + w <= 0 or y + h <= 0):
+                try:
+                    self.geometry(f"{w}x{h}{m.group(3)}{m.group(4)}")
+                except Exception:
+                    pass
+        if self._prefs.get("window_maximized"):
+            try:
+                self.state("zoomed")
+            except Exception:
+                pass  # Tk builds without a zoomed state (macOS) keep geometry.
 
     def _apply_prefs_to_ctk(self) -> None:
         try:
@@ -871,6 +889,9 @@ class UniversalAudioStudio(ctk.CTk):
         # further window-state actions. Without this the app starts with a
         # hidden window: mainloop runs, no error, nothing on screen.
         self.update()
+        # Caret in the URL box from the first frame: paste + Enter should
+        # work without reaching for the mouse first.
+        self.url_entry.focus_set()
 
     def _start_worker(self, target):
         threading.Thread(target=target, daemon=True).start()
@@ -930,6 +951,16 @@ class UniversalAudioStudio(ctk.CTk):
             placeholder_text="Paste link or search song name"
         )
         self.url_entry.pack(pady=(4,8), padx=20, fill="x")
+
+        # Inline clear button: overlays the field's right edge and only shows
+        # while there is text to clear (Escape does the same from the keyboard).
+        self.btn_clear_url = ctk.CTkButton(
+            self.url_entry, text="✕", width=24, height=24,
+            fg_color="transparent", hover_color="#34495e",
+            text_color="#95a5a6", corner_radius=12, cursor="hand2",
+            command=self._on_clear_url_clicked,
+        )
+        self._url_clear_btn_visible = False
 
         # Button for MP3/Spotify
         self.btn_download_mp3 = ctk.CTkButton(
@@ -1020,6 +1051,14 @@ class UniversalAudioStudio(ctk.CTk):
         # a multi-URL paste goes to the queue. (#1 on the UI wish list.)
         self.url_entry.bind("<Return>", self._on_url_enter)
         self.url_entry.bind("<KP_Enter>", self._on_url_enter)
+        # Escape empties the box without leaving the field.
+        self.url_entry.bind("<Escape>", self._clear_url_entry)
+        self.url_entry.bind("<KeyRelease>", lambda e: self._sync_clear_btn())
+        # A paste that skips the keyboard (context menu) fires no KeyRelease
+        # on the entry; re-check right after the class binding inserted text.
+        self.url_entry.bind(
+            "<<Paste>>", lambda e: self.after(1, self._sync_clear_btn)
+        )
         self.btn_download_mp3.bind("<Enter>", lambda e: self._set_hover_detail("Download MP3 with artwork and metadata.", "#ecf0f1"))
         self.btn_download_mp3.bind("<Leave>", lambda e: self._restore_hover_detail())
         self.btn_download_mp4.bind("<Enter>", lambda e: self._set_hover_detail("Download high quality MP4 video.", "#ecf0f1"))
@@ -1118,6 +1157,33 @@ class UniversalAudioStudio(ctk.CTk):
 
         self._last_downloaded_file = None
         self._last_dl_was_video = False
+
+    def _sync_clear_btn(self):
+        """Show the inline ✕ only while the URL box has text."""
+        try:
+            show = bool(self.url_entry.get().strip())
+            if show == self._url_clear_btn_visible:
+                return
+            self._url_clear_btn_visible = show
+            if show:
+                self.btn_clear_url.place(relx=1.0, rely=0.5, anchor="e", x=-6)
+            else:
+                self.btn_clear_url.place_forget()
+        except Exception:
+            pass
+
+    def _clear_url_entry(self, _event=None):
+        """Escape (and the ✕ button) empty the URL box; keep focus in it."""
+        try:
+            self.url_entry.delete(0, "end")
+        except Exception:
+            pass
+        self._sync_clear_btn()
+        return "break"
+
+    def _on_clear_url_clicked(self):
+        self._clear_url_entry()
+        self.url_entry.focus_set()
 
     def _on_url_enter(self, _event=None):
         """Pressing Enter in the URL box starts the obvious next action.
@@ -1337,12 +1403,16 @@ class UniversalAudioStudio(ctk.CTk):
         lb = self.queue_listbox
         if not self._queue_manager:
             lb.delete(0, tk.END)
+            self._queue_show_empty_placeholder()
             self._update_queue_status()
             return
         active_idx = self._queue_manager.active_index
         labels = [self._queue_row_label(i, item, active_idx)
                   for i, item in enumerate(self._queue_manager.items)]
-        if lb.size() != len(labels):
+        if not labels:
+            lb.delete(0, tk.END)
+            self._queue_show_empty_placeholder()
+        elif lb.size() != len(labels):
             lb.delete(0, tk.END)
             for label in labels:
                 lb.insert(tk.END, label)
@@ -1357,6 +1427,17 @@ class UniversalAudioStudio(ctk.CTk):
                     lb.itemconfig(i, text=label)
         self._update_queue_status()
 
+    def _queue_show_empty_placeholder(self):
+        """Fill the blank listbox with a hint so an empty queue reads as
+        'nothing here yet' instead of a dead panel."""
+        pal = getattr(self, "_palette", {}) or {}
+        self.queue_listbox.insert(
+            tk.END, "  Queue is empty — paste links on the Downloader page")
+        try:
+            self.queue_listbox.itemconfig(0, foreground=pal.get("sub", "#95a5a6"))
+        except Exception:
+            pass
+
     def _update_queue_status(self):
         """Status line: "3 of 5 items • 60% • Active"."""
         items = self._queue_manager.items if self._queue_manager else []
@@ -1369,7 +1450,7 @@ class UniversalAudioStudio(ctk.CTk):
 
     def _queue_start(self):
         self._init_queue_manager()
-        if self._queue_manager and not self._queue_manager.is_running:
+        if self._queue_manager and self._queue_manager.items and not self._queue_manager.is_running:
             self._queue_manager.start()
             self._refresh_queue_tab()
 
@@ -1396,6 +1477,9 @@ class UniversalAudioStudio(ctk.CTk):
 
     def _queue_remove_selected(self):
         if not self._queue_manager:
+            return
+        if not getattr(self._queue_manager, "items", None):
+            # Only the empty-state placeholder row is in the listbox.
             return
         sel = self.queue_listbox.curselection()
         if not sel:
@@ -2542,7 +2626,18 @@ class UniversalAudioStudio(ctk.CTk):
             self.update_dl_detail(self._dl_detail_backup_text, getattr(self, "_dl_detail_backup_color", "#95a5a6"))
 
     def update_progress_bar(self, value):
-        self.after(0, lambda: self.progress_bar.set(min(max(value, 0.0), 1.0)))
+        value = min(max(value, 0.0), 1.0)
+
+        def _apply():
+            self.progress_bar.set(value)
+            # Mirror progress into the title so the taskbar/hover shows it
+            # without focusing the window; skip no-change ticks.
+            pct = int(value * 100)
+            if pct != getattr(self, "_last_title_pct", None):
+                self._last_title_pct = pct
+                self.title(f"TuneLab — {pct}%")
+
+        self.after(0, _apply)
 
     def on_dl_success(self, folder):
         self.after(0, lambda: self._finalize_download(folder, None))
@@ -2594,6 +2689,8 @@ class UniversalAudioStudio(ctk.CTk):
             # Save to history
             self._save_direct_download_to_history(folder, err,
                 filepath=self._last_downloaded_file, is_video=self._last_dl_was_video)
+        self.title("TuneLab")
+        self._last_title_pct = None
         self.set_download_buttons_state(True)
 
     @staticmethod
@@ -3038,6 +3135,11 @@ class UniversalAudioStudio(ctk.CTk):
         )
         self.sb_toggle_btn.pack(fill="x", padx=8, pady=(10, 2))
         self.sb_toggle_btn.configure(anchor='e' if expanded else 'center')
+        self.sb_toggle_btn.bind(
+            '<Enter>',
+            lambda e: self._schedule_sb_tooltip(
+                self.sb_toggle_btn, 'Collapse or expand the sidebar.  (Ctrl+B)'))
+        self.sb_toggle_btn.bind('<Leave>', lambda e: self._hide_sb_tooltip())
 
         self.sb_brand = ctk.CTkLabel(
             self.sidebar,
@@ -3060,12 +3162,12 @@ class UniversalAudioStudio(ctk.CTk):
             'performance': ('⚡', 'Speed'),
         }
         self._sb_tips = {
-            'downloader': 'Switch to MP3/MP4 download tools.',
-            'queue': 'View and manage the download queue.',
-            'history': 'View and re-download past downloads.',
-            'studio': 'Open the slowed/reverb studio view.',
-            'settings': 'Customize UI style and performance.',
-            'performance': 'Tune performance options for smoother operation.',
+            'downloader': 'Switch to MP3/MP4 download tools.  (Ctrl+1)',
+            'queue': 'View and manage the download queue.  (Ctrl+2)',
+            'history': 'View and re-download past downloads.  (Ctrl+3)',
+            'studio': 'Open the slowed/reverb studio view.  (Ctrl+4)',
+            'settings': 'Customize UI style and performance.  (Ctrl+5)',
+            'performance': 'Tune performance options for smoother operation.  (Ctrl+6)',
         }
 
                 
@@ -3740,6 +3842,64 @@ def _setup_logging() -> None:
 
 if __name__ == "__main__":
     _setup_logging()
+
+    # Single instance on Windows: a second launch brings the running window
+    # to the front instead of starting a twin with its own queue and
+    # downloads. TUNELAB_MULTI_INSTANCE=1 bypasses it for development.
+    if sys.platform == "win32" and os.environ.get("TUNELAB_MULTI_INSTANCE") != "1":
+        try:
+            from ctypes import wintypes
+
+            _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            _u32 = ctypes.WinDLL("user32", use_last_error=True)
+            _k32.CreateMutexW.argtypes = (
+                ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+            _k32.CreateMutexW.restype = wintypes.HANDLE
+            _u32.EnumWindows.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t)
+            _u32.EnumWindows.restype = wintypes.BOOL
+            _u32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+            _u32.GetWindowTextLengthW.restype = ctypes.c_int
+            _u32.GetWindowTextW.argtypes = (
+                wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+            _u32.GetWindowTextW.restype = ctypes.c_int
+            _u32.IsIconic.argtypes = (wintypes.HWND,)
+            _u32.IsIconic.restype = wintypes.BOOL
+            _u32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+            _u32.ShowWindow.restype = wintypes.BOOL
+            _u32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+            _u32.SetForegroundWindow.restype = wintypes.BOOL
+
+            # ERROR_ALREADY_EXISTS (183): the mutex was already there, so a
+            # TuneLab is running. Its title may carry a download percentage,
+            # so the lookup matches the "TuneLab" prefix.
+            _k32.CreateMutexW(None, False, "TuneLab_SingleInstance_Mutex")
+            if ctypes.get_last_error() == 183:
+                _found: list[Any] = []
+
+                @ctypes.WINFUNCTYPE(
+                    wintypes.BOOL, wintypes.HWND, ctypes.c_ssize_t)
+                def _find(hwnd, _lparam):
+                    n = _u32.GetWindowTextLengthW(hwnd)
+                    if n:
+                        buf = ctypes.create_unicode_buffer(n + 1)
+                        _u32.GetWindowTextW(hwnd, buf, n + 1)
+                        if buf.value.startswith("TuneLab"):
+                            _found.append(hwnd)
+                            return False  # stop enumerating
+                    return True
+
+                _u32.EnumWindows(_find, 0)
+                if _found:
+                    _hwnd = _found[0]
+                    if _u32.IsIconic(_hwnd):
+                        _u32.ShowWindow(_hwnd, 9)  # SW_RESTORE
+                    _u32.SetForegroundWindow(_hwnd)
+                    sys.exit(0)
+                # Mutex exists but no window was found (startup race): fall
+                # through and launch normally rather than exiting blind.
+        except Exception:
+            logger.debug("Single-instance check failed", exc_info=True)
+
     app = UniversalAudioStudio()
 
     # One-time DWM tweak: disallow window transition animations so Windows

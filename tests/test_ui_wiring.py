@@ -104,6 +104,25 @@ class QueueRefreshTests(unittest.TestCase):
         self.assertIn("_history_view_sig", body)
 
 
+    def test_empty_queue_shows_a_placeholder(self):
+        body = _method_source("_rebuild_queue_list")
+        self.assertIn("_queue_show_empty_placeholder", body)
+        src = _source()
+        self.assertIn("Queue is empty", src)
+
+
+class ProgressTitleTests(unittest.TestCase):
+    """Live progress should be readable from the taskbar, unfocused."""
+
+    def test_progress_bar_updates_the_window_title(self):
+        body = _method_source("update_progress_bar")
+        self.assertIn("self.title(", body)
+
+    def test_title_resets_when_the_download_finishes(self):
+        body = _method_source("_finalize_download")
+        self.assertIn('self.title("TuneLab")', body)
+
+
 class ToastTests(unittest.TestCase):
     """Toasts stack, dismiss on click, and are capped (Tier 2 #7/#8)."""
 
@@ -119,6 +138,15 @@ class ToastTests(unittest.TestCase):
         src = _source()
         self.assertNotIn('messagebox.showwarning("Queue"', src)
         self.assertIn('self.show_toast("No valid URLs found.", "warning")', src)
+
+
+    def test_escape_clears_the_url_entry(self):
+        src = _source()
+        self.assertIn(
+            'self.url_entry.bind("<Escape>", self._clear_url_entry)', src)
+        body = _method_source("_clear_url_entry")
+        self.assertIn("delete(0", body)
+        self.assertIn('"break"', body)
 
 
 class WindowGeometryTests(unittest.TestCase):
@@ -137,6 +165,17 @@ class WindowGeometryTests(unittest.TestCase):
         body = _method_source("_restore_window_geometry")
         self.assertIn("winfo_screenwidth", body)
         self.assertIn("winfo_screenheight", body)
+
+
+    def test_maximized_state_is_persisted(self):
+        remember = _method_source("_remember_window_geometry")
+        self.assertIn('"window_maximized"', remember)
+        self.assertIn('"zoomed"', remember)
+
+    def test_maximized_state_is_restored(self):
+        restore = _method_source("_restore_window_geometry")
+        self.assertIn('self._prefs.get("window_maximized")', restore)
+        self.assertIn('self.state("zoomed")', restore)
 
 
 class StartupRevealTests(unittest.TestCase):
@@ -159,6 +198,26 @@ class StartupRevealTests(unittest.TestCase):
             "customtkinter 6.0's first mainloop() leaves the window "
             "withdrawn and the app starts hidden with no error.",
         )
+
+    def test_init_focuses_the_url_box_after_reveal(self):
+        body = _method_source("__init__")
+        update = body.index("self.update()")
+        focus = body.index("self.url_entry.focus_set()", update)
+        self.assertLess(
+            update, focus,
+            "startup should put the caret in the URL box once the window is "
+            "revealed, so paste + Enter works without reaching for the mouse.",
+        )
+
+
+class SingleInstanceTests(unittest.TestCase):
+    """A second launch must focus the running window, not start a twin."""
+
+    def test_windows_mutex_guard_exists(self):
+        src = _source()
+        self.assertIn("TuneLab_SingleInstance_Mutex", src)
+        self.assertIn("ERROR_ALREADY_EXISTS", src)
+        self.assertIn("sys.exit(0)", src)
 
 
 class ShortcutTests(unittest.TestCase):
