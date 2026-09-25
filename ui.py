@@ -424,6 +424,7 @@ class UniversalAudioStudio(ctk.CTk):
             "save_folder": "",
             "audio_format": "mp3_vbr",
             "filename_template": "",
+            "window_geometry": "",
         }
 
     def _load_prefs(self) -> dict:
@@ -459,6 +460,44 @@ class UniversalAudioStudio(ctk.CTk):
         else:
             self._prefs[key] = value
         self._save_prefs()
+
+    def _remember_window_geometry(self) -> None:
+        """Persist the current window size/position for the next launch."""
+        try:
+            if str(self.state()) != "normal":
+                return
+            geo = str(self.geometry() or "")
+            if re.match(r"^\d+x\d+[+-]\d+[+-]\d+$", geo):
+                self._set_pref("window_geometry", geo)
+        except Exception:
+            pass
+
+    def _restore_window_geometry(self) -> None:
+        """Reapply the saved window geometry when it still fits a screen."""
+        geo = str(self._prefs.get("window_geometry", "") or "").strip()
+        m = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geo)
+        if not m:
+            return
+        # Clamp to the window's own minimum so a stale tiny geometry can't
+        # make the app unusable (minsize(800, 680) in __init__).
+        w = max(int(m.group(1)), 800)
+        h = max(int(m.group(2)), 680)
+        x = int(m.group(3))
+        y = int(m.group(4))
+        try:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+        except Exception:
+            return
+        # Skip the restore when the saved frame is fully off every attached
+        # screen (monitor unplugged since last run): Tk would place it there
+        # anyway and the window would be unreachable.
+        if x >= sw or y >= sh or x + w <= 0 or y + h <= 0:
+            return
+        try:
+            self.geometry(f"{w}x{h}{m.group(3)}{m.group(4)}")
+        except Exception:
+            pass
 
     def _apply_prefs_to_ctk(self) -> None:
         try:
@@ -658,6 +697,12 @@ class UniversalAudioStudio(ctk.CTk):
         self._clipper_hover_preview_enabled = True
         self._clipper_hover_preview_muted = True
         self._clipper_thumb_generated = set()
+        # Toast stack, unfocused-completion badge and view caches (declared
+        # here so Pylance sees them before first use).
+        self._active_toasts: list[Any] = []
+        self._unfocused_done: int = 0
+        self._queue_refresh_pending: bool = False
+        self._history_view_sig: Any = None
 
         self.title("TuneLab")
         # Let packed widgets determine natural size; no fixed geometry.
@@ -798,11 +843,23 @@ class UniversalAudioStudio(ctk.CTk):
         # Collapse/expand shortcut (like VS Code's side bar)
         self.bind('<Control-b>', lambda e: self.toggle_sidebar())
 
+        # Quick nav: Ctrl+1..6 jump straight to a page.
+        for _n, _page in enumerate(
+            ("downloader", "queue", "history", "studio", "settings", "performance"),
+            start=1,
+        ):
+            self.bind(f'<Control-{_n}>', lambda e, p=_page: self.show_frame(p))
+
+        # Clear the unfocused-completion badge as soon as the user looks at
+        # the app again.
+        self.bind('<FocusIn>', lambda e: self._clear_completion_badge())
+
         # Start by showing downloader
         self.show_frame('downloader')
 
         # Everything exists now. Resolve the layout in one pass and show the
         # finished window, instead of letting Tk reveal it widget by widget.
+        self._restore_window_geometry()
         self.update_idletasks()
         self.deiconify()
 
@@ -950,6 +1007,10 @@ class UniversalAudioStudio(ctk.CTk):
 
         self.url_entry.bind("<Enter>", lambda e: self._set_hover_detail("Paste link or search song. Spotify links are auto-converted.", "#bdc3c7"))
         self.url_entry.bind("<Leave>", lambda e: self._restore_hover_detail())
+        # Enter = the obvious next action: one input downloads right away,
+        # a multi-URL paste goes to the queue. (#1 on the UI wish list.)
+        self.url_entry.bind("<Return>", self._on_url_enter)
+        self.url_entry.bind("<KP_Enter>", self._on_url_enter)
         self.btn_download_mp3.bind("<Enter>", lambda e: self._set_hover_detail("Download MP3 with artwork and metadata.", "#ecf0f1"))
         self.btn_download_mp3.bind("<Leave>", lambda e: self._restore_hover_detail())
         self.btn_download_mp4.bind("<Enter>", lambda e: self._set_hover_detail("Download high quality MP4 video.", "#ecf0f1"))
@@ -1049,6 +1110,29 @@ class UniversalAudioStudio(ctk.CTk):
         self._last_downloaded_file = None
         self._last_dl_was_video = False
 
+    def _on_url_enter(self, _event=None):
+        """Pressing Enter in the URL box starts the obvious next action.
+
+        A single URL (or a search term / Spotify URI) downloads right away;
+        multiple pasted URLs go to the queue instead, matching what the
+        buttons do. Returns "break" so Tk doesn't beep or move focus.
+        """
+        try:
+            if str(self.btn_download_mp3.cget("state")) == "disabled":
+                # A direct download is running (the buttons are disabled
+                # while it is); mirror the buttons instead of racing it.
+                return "break"
+        except Exception:
+            pass
+        raw = self.url_entry.get().strip()
+        if not raw:
+            return "break"
+        if len(self._split_input_urls(raw)) > 1:
+            self._add_current_to_queue()
+        else:
+            self._start_worker(self.download_mp3)
+        return "break"
+
     def _add_current_to_queue(self):
         """Add the current URL(s) to the queue without starting download.
 
@@ -1059,11 +1143,11 @@ class UniversalAudioStudio(ctk.CTk):
         """
         raw = self.url_entry.get().strip()
         if not raw:
-            messagebox.showwarning("Queue", "Please enter a URL first.")
+            self.show_toast("Please enter a URL first.", "warning")
             return
         urls = self._split_input_urls(raw)
         if not urls:
-            messagebox.showwarning("Queue", "No valid URLs found.")
+            self.show_toast("No valid URLs found.", "warning")
             return
         self._init_queue_manager()
         if not self._queue_manager:
@@ -1124,6 +1208,7 @@ class UniversalAudioStudio(ctk.CTk):
                 self._last_downloaded_file = getattr(item, 'filepath', None) or self._last_downloaded_file
                 self.btn_edit_tags.configure(state="normal")
                 self.update_dl_status(f"Downloaded: {os.path.basename(str(item.filepath) if item.filepath else '')}", "#2ecc71")
+                self._bump_completion_badge()
         self.after(0, _do)
         # This callback runs on the queue worker thread; never touch Tk directly.
         self.after(0, self._refresh_queue_tab)
@@ -1132,7 +1217,25 @@ class UniversalAudioStudio(ctk.CTk):
         """Called from the queue worker thread; refresh the queue display."""
         if pct is not None:
             item._progress = pct
-        self.after(0, self._refresh_queue_tab)
+        self._schedule_queue_refresh()
+
+    def _schedule_queue_refresh(self):
+        """Coalesce refresh storms from the worker thread.
+
+        yt-dlp fires progress callbacks many times a second; queueing one
+        full refresh per event flooded the Tk event loop (visible stutter)
+        for updates the eye cannot resolve anyway. At most one refresh per
+        ~120 ms keeps the display smooth for a fraction of the cost.
+        """
+        if self._queue_refresh_pending:
+            return
+        self._queue_refresh_pending = True
+
+        def _run():
+            self._queue_refresh_pending = False
+            self._refresh_queue_tab()
+
+        self.after(120, _run)
 
     def _refresh_queue_tab(self):
         try:
@@ -1143,12 +1246,24 @@ class UniversalAudioStudio(ctk.CTk):
     def build_queue_view(self):
         ctk.CTkLabel(self.tab_queue, text="Download Queue", font=("Segoe UI", 18, "bold")).pack(pady=(20, 10))
 
-        self.queue_listbox = tk.Listbox(self.tab_queue, height=12, font=("Segoe UI", 11),
-                                        bg="#2c3e50", fg="#ecf0f1", selectmode="browse")
+        # Colors follow the active palette so Light mode doesn't keep
+        # hardcoded dark rows (tk.Listbox isn't a CTk widget, so the theme
+        # walker in apply_color_theme never touches it — it's recolored
+        # explicitly there instead).
+        pal = getattr(self, "_palette", {}) or {}
+        self.queue_listbox = tk.Listbox(
+            self.tab_queue, height=12, font=("Segoe UI", 11),
+            bg=pal.get("sidebar_active", "#2c3e50"),
+            fg=pal.get("text", "#ecf0f1"),
+            selectbackground=pal.get("accent", "#3498db"),
+            selectforeground=pal.get("text", "#ecf0f1"),
+            selectmode="browse", activestyle="none",
+            highlightthickness=0, bd=0, relief="flat",
+        )
         self.queue_listbox.pack(pady=(0, 12), padx=20, fill="both", expand=True)
 
         queue_btn_row = ctk.CTkFrame(self.tab_queue, fg_color="transparent")
-        queue_btn_row.pack(pady=(0, 10))
+        queue_btn_row.pack(pady=(0, 6))
 
         self.btn_queue_start = ctk.CTkButton(
             queue_btn_row, text="▶ Start", width=90, height=30,
@@ -1173,14 +1288,20 @@ class UniversalAudioStudio(ctk.CTk):
             command=self._queue_cancel_all)
         self.btn_queue_cancel.pack(side="left", padx=4)
 
+        # Second row: six buttons in one row (~600px) clipped off the right
+        # edge at the 800px minimum window width, especially with the
+        # sidebar expanded, so the maintenance actions sit on their own row.
+        queue_btn_row2 = ctk.CTkFrame(self.tab_queue, fg_color="transparent")
+        queue_btn_row2.pack(pady=(0, 10))
+
         self.btn_queue_clear = ctk.CTkButton(
-            queue_btn_row, text="🧹 Clear", width=90, height=30,
+            queue_btn_row2, text="🧹 Clear", width=90, height=30,
             fg_color="#636e72", hover_color="#57606f",
             command=self._queue_clear)
         self.btn_queue_clear.pack(side="left", padx=4)
 
         self.btn_queue_clear_done = ctk.CTkButton(
-            queue_btn_row, text="✓ Clear Done", width=100, height=30,
+            queue_btn_row2, text="✓ Clear Done", width=100, height=30,
             fg_color="#27ae60", hover_color="#229954",
             command=self._queue_clear_completed)
         self.btn_queue_clear_done.pack(side="left", padx=4)
@@ -1191,28 +1312,49 @@ class UniversalAudioStudio(ctk.CTk):
 
         self.tab_queue.place(relx=0, rely=0, relwidth=1, relheight=1)
 
+    @staticmethod
+    def _queue_row_label(idx, item, active_idx):
+        """Format one queue row; kept pure so tests can pin the rendering."""
+        icon = {"pending": "⏳", "active": "▶", "done": "✓", "failed": "✗",
+                "skipped": "⊘", "cancelled": "⊘"}.get(item.status, "?")
+        # Show progress hint for the active item (e.g. "▶ [ACTIVE] 45% ...").
+        if idx == active_idx and item.status == "active":
+            progress = getattr(item, '_progress', None)
+            pct = f" {int(progress*100)}%" if progress is not None else ""
+            return f"{icon} [ACTIVE]{pct} {item.url[:45]}"
+        return f"{icon} [{item.status.upper():>9}] {item.url[:50]}"
+
     def _rebuild_queue_list(self):
-        self.queue_listbox.delete(0, tk.END)
+        lb = self.queue_listbox
         if not self._queue_manager:
+            lb.delete(0, tk.END)
+            self._update_queue_status()
             return
         active_idx = self._queue_manager.active_index
-        for i, item in enumerate(self._queue_manager.items):
-            icon = {"pending": "⏳", "active": "▶", "done": "✓", "failed": "✗",
-                    "skipped": "⊘", "cancelled": "⊘"}.get(item.status, "?")
-            # Show progress hint for the active item (e.g. "▶ [ACTIVE] 45% ...").
-            if i == active_idx and item.status == "active":
-                progress = getattr(item, '_progress', None)
-                pct = f" {int(progress*100)}%" if progress is not None else ""
-                label = f"{icon} [ACTIVE]{pct} {item.url[:45]}"
-            else:
-                label = f"{icon} [{item.status.upper():>9}] {item.url[:50]}"
-            self.queue_listbox.insert(tk.END, label)
-        # Status line with total progress: "3 of 5 items • 60% • Active".
-        items = self._queue_manager.items
+        labels = [self._queue_row_label(i, item, active_idx)
+                  for i, item in enumerate(self._queue_manager.items)]
+        if lb.size() != len(labels):
+            lb.delete(0, tk.END)
+            for label in labels:
+                lb.insert(tk.END, label)
+        else:
+            # Same row count (the usual progress-tick case): touch only the
+            # rows whose text changed. The old delete-everything + re-insert
+            # ran on every yt-dlp progress callback — it flooded the event
+            # loop (stutter), repainted the whole list, and threw away the
+            # selection on every tick.
+            for i, label in enumerate(labels):
+                if lb.get(i) != label:
+                    lb.itemconfig(i, text=label)
+        self._update_queue_status()
+
+    def _update_queue_status(self):
+        """Status line: "3 of 5 items • 60% • Active"."""
+        items = self._queue_manager.items if self._queue_manager else []
         total = len(items)
         done = sum(1 for it in items if it.status in ("done", "failed", "skipped"))
         overall = int((done / total) * 100) if total else 0
-        running = self._queue_manager.is_running
+        running = bool(self._queue_manager and self._queue_manager.is_running)
         self.queue_status.configure(
             text=f"{done}/{total} items • {overall}% • {'Active' if running else 'Idle'}")
 
@@ -1329,11 +1471,14 @@ class UniversalAudioStudio(ctk.CTk):
             self._history_sort_reverse = True if key == "date" else False
         self._refresh_history_view()
 
-    def _refresh_history_view(self):
-        """Rebuild the history entry list from the saved history file."""
-        for w in self._history_entries_frame.winfo_children():
-            w.destroy()
+    def _refresh_history_view(self, force: bool = False):
+        """Rebuild the history entry list from the saved history file.
 
+        Skips the (expensive) widget rebuild when the filtered and sorted
+        result matches what is already on screen: show_frame calls this
+        every time the tab opens, and recreating every row on each visit
+        was a visible stutter.
+        """
         history = []
         self._init_queue_manager()
         if self._queue_manager:
@@ -1359,6 +1504,25 @@ class UniversalAudioStudio(ctk.CTk):
                 return entry.get("status", "")
             return 0
         history = sorted(history, key=_sort_key, reverse=reverse)
+
+        # Signature of what should be on screen; identical content means
+        # the widgets are already correct and can be left alone.
+        sig = (
+            query,
+            self._history_sort_key,
+            self._history_sort_reverse,
+            tuple(
+                (e.get("url"), e.get("title"), e.get("status"),
+                 e.get("filepath"), e.get("completed_at"))
+                for e in history
+            ),
+        )
+        if not force and sig == self._history_view_sig:
+            return
+        self._history_view_sig = sig
+
+        for w in self._history_entries_frame.winfo_children():
+            w.destroy()
 
         self.history_count_lbl.configure(text=f"{len(history)} entries")
 
@@ -1436,6 +1600,10 @@ class UniversalAudioStudio(ctk.CTk):
             command=lambda u=url, v=is_video: self._redownload(u, v),
         )
         btn_redl.pack(side="left", padx=2)
+        # Glyph-only buttons get hover tooltips (reusing the sidebar popup,
+        # which already avoids the transient-black-flicker traps).
+        btn_redl.bind("<Enter>", lambda e, b=btn_redl: self._schedule_sb_tooltip(b, "Re-download this URL", only_when_collapsed=False))
+        btn_redl.bind("<Leave>", lambda e: self._hide_sb_tooltip())
 
         # Open file button (only if file exists)
         if file_exists:
@@ -1445,6 +1613,8 @@ class UniversalAudioStudio(ctk.CTk):
                 command=lambda p=filepath: self._open_file(p),
             )
             btn_open.pack(side="left", padx=2)
+            btn_open.bind("<Enter>", lambda e, b=btn_open: self._schedule_sb_tooltip(b, "Open file", only_when_collapsed=False))
+            btn_open.bind("<Leave>", lambda e: self._hide_sb_tooltip())
 
     def _redownload(self, url, is_video):
         """Re-download a URL from history by injecting it into the downloader."""
@@ -1459,17 +1629,44 @@ class UniversalAudioStudio(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Re-download Error", f"Could not start re-download:\n{e}")
 
+    @staticmethod
+    def _open_file_command(filepath, mode="open", platform=None, is_dir=False):
+        """Return the OS command that opens *filepath* or reveals its folder.
+
+        Extracted from _open_file so the platform branching is testable
+        without a live Tk window. ``mode`` is "open" (launch with the
+        default app) or "reveal" (show it in a file manager). Returns a
+        Popen argv list, or a shell string on Windows where ``start`` is a
+        shell builtin rather than an executable.
+        """
+        plat = platform if platform is not None else sys.platform
+        if plat == "darwin":
+            # macOS: `open` launches the file; `-R` reveals it in Finder.
+            return ["open", filepath] if mode == "open" else ["open", "-R", filepath]
+        if plat.startswith(("linux", "freebsd", "openbsd")):
+            return ["xdg-open", filepath]
+        # Windows (and anything else): the old code always ran `start`, which
+        # silently did nothing on Mac/Linux.
+        if mode == "reveal":
+            return ["explorer", "/select,", filepath]
+        if is_dir:
+            return ["explorer", filepath]
+        return f'start "" "{filepath}"'
+
     def _open_file(self, filepath):
         """Open a downloaded file with the system default app."""
-        try:
-            import subprocess
-            subprocess.Popen(["start", "", filepath], shell=True)
-        except Exception:
+        is_dir = os.path.isdir(filepath)
+        for mode in ("open", "reveal"):
             try:
-                import subprocess
-                subprocess.Popen(["explorer", "/select,", filepath])
-            except Exception as e:
-                messagebox.showerror("Open Error", f"Could not open file:\n{e}")
+                cmd = self._open_file_command(filepath, mode=mode, is_dir=is_dir)
+                if isinstance(cmd, str):
+                    subprocess.Popen(cmd, shell=True)
+                else:
+                    subprocess.Popen(cmd, **downloader._no_window_kwargs())
+                return
+            except Exception:
+                continue
+        messagebox.showerror("Open Error", f"Could not open file:\n{filepath}")
 
     def _clear_history(self):
         """Wipe the download history after confirmation."""
@@ -1492,7 +1689,11 @@ class UniversalAudioStudio(ctk.CTk):
     # -----------------
     def show_toast(self, message: str, toast_type: str = "info", duration: int = 3500):
         """Show a non-blocking toast notification at the bottom-right.
-        
+
+        Toasts stack upward instead of drawing on top of each other, can be
+        dismissed early with a click, and are capped at four so a burst of
+        messages can never cover the window.
+
         toast_type: 'info' (blue), 'success' (green), 'warning' (orange), 'error' (red)
         duration: milliseconds before auto-dismiss
         """
@@ -1503,24 +1704,56 @@ class UniversalAudioStudio(ctk.CTk):
             "error": ("#e74c3c", "#c0392b"),
         }
         fg_color, hover_color = colors.get(toast_type, colors["info"])
+        del hover_color  # kept in the tuple for symmetry; frames have no hover
 
         try:
+            # Drop entries whose widget was destroyed, then cap the stack
+            # (oldest first) so rapid successions can't flood the window.
+            self._active_toasts = [t for t in self._active_toasts if t.winfo_exists()]
+            while len(self._active_toasts) >= 4:
+                try:
+                    self._active_toasts.pop(0).destroy()
+                except Exception:
+                    pass
+
             toast = ctk.CTkFrame(self, fg_color=fg_color, corner_radius=10)
-            toast.place(relx=0.98, rely=0.95, anchor="se")
 
             icon = {"info": "ℹ", "success": "✓", "warning": "⚠", "error": "✗"}.get(toast_type, "ℹ")
-            lbl = ctk.CTkLabel(toast, text=f" {icon} {message}", font=("Segoe UI", 12), text_color="white")
+            lbl = ctk.CTkLabel(
+                toast, text=f" {icon} {message}",
+                font=("Segoe UI", 12), text_color="white",
+                wraplength=340, justify="right",
+            )
             lbl.pack(padx=16, pady=10)
 
-            # Auto-dismiss after duration
+            self._active_toasts.append(toast)
+            self._reposition_toasts()
+
             def _dismiss():
                 try:
+                    if toast in self._active_toasts:
+                        self._active_toasts.remove(toast)
                     toast.destroy()
                 except Exception:
                     pass
+                self._reposition_toasts()
+
+            # Click anywhere on the toast to dismiss it immediately.
+            toast.bind("<Button-1>", lambda e: _dismiss())
+            lbl.bind("<Button-1>", lambda e: _dismiss())
+
+            # Auto-dismiss after duration
             self.after(duration, _dismiss)
         except Exception:
             pass
+
+    def _reposition_toasts(self, _event=None):
+        """Keep the toast stack bottom-anchored and evenly spaced."""
+        for i, t in enumerate(self._active_toasts):
+            try:
+                t.place(relx=0.98, rely=0.955 - i * 0.065, anchor="se")
+            except Exception:
+                pass
 
     def update_speed_label(self, speed_text: str):
         """Update the speed/ETA label below the progress bar."""
@@ -1538,7 +1771,7 @@ class UniversalAudioStudio(ctk.CTk):
             messagebox.showerror("Tag Editor", f"Could not open tag editor: {e}")
 
     def _on_tags_saved(self):
-        messagebox.showinfo("Tags Saved", "Tags updated successfully.")
+        self.show_toast("Tags updated successfully.", "success")
 
 
     def _update_save_folder_label(self):
@@ -1625,6 +1858,13 @@ class UniversalAudioStudio(ctk.CTk):
                     f"Update button in the Performance tab.",
                     "#f39c12",
                 )
+                # The detail label only lives on the Downloader tab; a toast
+                # carries the same notice to whatever tab is on screen.
+                self.show_toast(
+                    f"yt-dlp update available ({local} -> {latest}) — see the Performance tab.",
+                    "warning",
+                    duration=6000,
+                )
             self.after(0, push_banner)
 
 
@@ -1682,14 +1922,14 @@ class UniversalAudioStudio(ctk.CTk):
             if not info or not info.get("version") or not info.get("download_url"):
                 self.after(0, lambda: self.update_dl_status("Could not reach update server.", "#e74c3c"))
                 self.after(0, lambda: self.app_update_btn.configure(state="normal", text="↻ Check for App Updates"))
-                self.after(0, lambda: messagebox.showinfo("Update Check", "No update information available right now."))
+                self.after(0, lambda: self.show_toast("No update information available right now.", "warning"))
                 return
 
             remote_ver = info["version"]
             dl_url = info["download_url"]
 
             if not updater.is_newer_version(remote_ver):
-                self.after(0, lambda: messagebox.showinfo("Up to Date", f"You already have the latest version ({local_ver}).\nNo update needed."))
+                self.after(0, lambda: self.show_toast(f"You already have the latest version ({local_ver}).", "success"))
                 self.after(0, lambda: self.app_update_btn.configure(state="normal", text="↻ Check for App Updates"))
                 return
 
@@ -1795,14 +2035,11 @@ class UniversalAudioStudio(ctk.CTk):
         remote_ver = (release or {}).get("version")
         if not remote_ver:
             self.update_dl_status("Could not reach update server.", "#e74c3c")
-            messagebox.showinfo("Update Check",
-                                "No update information available right now.")
+            self.show_toast("No update information available right now.", "warning")
             return
         if not updater.is_newer_version(remote_ver):
             self.update_dl_status(f"Up to date (v{local_ver}).", "#27ae60")
-            messagebox.showinfo("Up to Date",
-                                f"You already have the latest version ({local_ver}).\n"
-                                "No update needed.")
+            self.show_toast(f"You already have the latest version ({local_ver}).", "success")
             return
         if not updater.macos_download_url(release):
             # Newer, but it ships no Mac build - a Windows-only release. Say so
@@ -1983,8 +2220,53 @@ class UniversalAudioStudio(ctk.CTk):
         finally:
             self.set_download_buttons_state(True)
 
+    def _bump_completion_badge(self):
+        """Count downloads that finished while the window was unfocused.
+
+        The taskbar title is the only signal that survives the user being
+        on another tab or another app; the badge clears on focus-in.
+        """
+        try:
+            if self.focus_displayof() is not None:
+                return  # the user is already looking at the app
+        except Exception:
+            return
+        self._unfocused_done += 1
+        try:
+            self.title(f"TuneLab ({self._unfocused_done} new)")
+        except Exception:
+            pass
+
+    def _clear_completion_badge(self, _event=None):
+        self._unfocused_done = 0
+        try:
+            self.title("TuneLab")
+        except Exception:
+            pass
+
+    def _downloads_in_flight(self) -> bool:
+        """True while a direct download or the queue worker is busy."""
+        try:
+            if self._queue_manager is not None and self._queue_manager.is_running:
+                return True
+        except Exception:
+            pass
+        try:
+            # set_download_buttons_state(False) disables these for the whole
+            # duration of a direct download, so their state is the flag.
+            return str(self.btn_download_mp3.cget("state")) == "disabled"
+        except Exception:
+            return False
+
     def _on_closing(self):
-        """Handle window close event."""
+        """Handle window close event, asking first when downloads run."""
+        if self._downloads_in_flight():
+            if not messagebox.askyesno(
+                "Downloads in Progress",
+                "Downloads are still running.\n\nQuit anyway?",
+            ):
+                return
+        self._remember_window_geometry()
         self._ui_closed = True
         self.destroy()
 
@@ -2000,7 +2282,7 @@ class UniversalAudioStudio(ctk.CTk):
     def preview_audio(self):
         url = self.url_entry.get().strip()
         if not url:
-            messagebox.showwarning("URL Missing", "Please enter a URL to preview.")
+            self.show_toast("Please enter a URL to preview.", "warning")
             return
         if not downloader.can_resolve_preview():
             messagebox.showerror(
@@ -2093,7 +2375,7 @@ class UniversalAudioStudio(ctk.CTk):
     def preview_video(self):
         url = self.url_entry.get().strip()
         if not url:
-            messagebox.showwarning("URL Missing", "Please enter a URL to preview.")
+            self.show_toast("Please enter a URL to preview.", "warning")
             return
         if not downloader.can_resolve_preview():
             messagebox.showerror(
@@ -2273,6 +2555,7 @@ class UniversalAudioStudio(ctk.CTk):
             self.update_dl_status("Finished!", "#2ecc71")
             self.progress_bar.set(1.0)
             self.update_dl_detail(str(folder), "#95a5a6")
+            self._bump_completion_badge()
             # Find the file THIS download just produced (newest by mtime) so the
             # tag-editor button and the ID3 writer target the right file. The old
             # reverse-sorted directory scan picked the alphabetically-last media
@@ -2543,8 +2826,12 @@ class UniversalAudioStudio(ctk.CTk):
             _aria2_path = downloader.get_fast_downloader_path() if cfg['use_aria2'] else None
             if cfg['use_aria2']:
                 if _aria2_path:
-                    _msg = f"aria2 found at:\n{_aria2_path}\n\nSettings applied."
+                    self.show_toast(
+                        f"Settings applied — aria2 found at {_aria2_path}",
+                        "success", duration=5000)
                 else:
+                    # The install instructions are too long for a toast;
+                    # this one stays a real dialog.
                     _msg = (
                         "Settings applied, but aria2 was NOT found on your system.\n\n"
                         "The 'use aria2' toggle will have no effect until aria2 is installed.\n\n"
@@ -2557,9 +2844,9 @@ class UniversalAudioStudio(ctk.CTk):
                         "  - macOS:   brew install aria2\n\n"
                         "Until then, leave this disabled."
                     )
+                    messagebox.showinfo("Performance", _msg)
             else:
-                _msg = "Performance settings applied (aria2 disabled)."
-            messagebox.showinfo("Performance", _msg)
+                self.show_toast("Performance settings applied (aria2 disabled).", "success")
         except Exception as e:
             messagebox.showerror("Performance Error", f"Failed to apply settings:\n{e}")
 
@@ -2618,15 +2905,22 @@ class UniversalAudioStudio(ctk.CTk):
                 target.place(relx=0, rely=0, relwidth=1, relheight=1)
             except Exception:
                 pass
-        try:
-            self.update_idletasks()
-        except Exception:
-            pass
+        # Unmap the rest BEFORE any forced repaint. Forcing update_idletasks
+        # here (the old code did) painted one frame with every transparent
+        # page still stacked, so the outgoing page bled through the incoming
+        # one — the "widgets clipping through each other" seen on click.
+        # With no forced pass in between, Tk coalesces map + unmap and paints
+        # only the final state; the single idletasks after the unmap keeps
+        # layout resolved for the nav animation without exposing the stack.
         for f in others:
             try:
                 f.place_forget()
             except Exception:
                 pass
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
 
         btn = self.nav_buttons.get(name)
         if btn is not None:
@@ -2888,7 +3182,7 @@ class UniversalAudioStudio(ctk.CTk):
         except Exception:
             pass
 
-    def _schedule_sb_tooltip(self, widget, text: str):
+    def _schedule_sb_tooltip(self, widget, text: str, only_when_collapsed: bool = True):
         """Delay tooltip show to avoid flicker when the mouse moves quickly."""
         try:
             pending = getattr(self, '_sb_tooltip_after_id', None)
@@ -2897,17 +3191,23 @@ class UniversalAudioStudio(ctk.CTk):
                     self.after_cancel(pending)
                 except Exception:
                     pass
-            self._sb_tooltip_after_id = self.after(450, lambda: self._show_sb_tooltip(widget, text))
+            self._sb_tooltip_after_id = self.after(
+                450, lambda: self._show_sb_tooltip(widget, text, only_when_collapsed))
         except Exception:
             pass
 
-    def _show_sb_tooltip(self, widget, text: str):
-        """Floating label beside the rail when the sidebar is collapsed."""
+    def _show_sb_tooltip(self, widget, text: str, only_when_collapsed: bool = True):
+        """Floating label beside the widget.
+
+        The collapsed nav rail uses it for icon labels; the History row
+        actions reuse it (``only_when_collapsed=False``) for their
+        glyph-only buttons.
+        """
         try:
             # Suppress tooltip during sidebar animation to prevent flicker.
             if getattr(self, '_sb_anim_after_id', None):
                 return
-            if self._sidebar_expanded:
+            if only_when_collapsed and self._sidebar_expanded:
                 self._hide_sb_tooltip()
                 return
             x = widget.winfo_rootx() + widget.winfo_width() + 8
@@ -3073,6 +3373,18 @@ class UniversalAudioStudio(ctk.CTk):
             self.nav_indicator.configure(fg_color=pal['accent'])
         except Exception:
             pass
+        # tk.Listbox has no fg_color option, so the role walk above never
+        # sees it; recolor it explicitly or the queue keeps its hardcoded
+        # dark rows after switching to a Light theme.
+        try:
+            self.queue_listbox.configure(
+                bg=pal.get('sidebar_active', '#2c3e50'),
+                fg=pal.get('text', '#ecf0f1'),
+                selectbackground=pal.get('accent', '#3498db'),
+                selectforeground=pal.get('text', '#ecf0f1'),
+            )
+        except Exception:
+            pass
         for bar_name in ('progress_bar', 'studio_progress_bar'):
             bar = getattr(self, bar_name, None)
             if bar is not None:
@@ -3227,7 +3539,7 @@ class UniversalAudioStudio(ctk.CTk):
                         preview += f" (+{len(removed_paths)-5} more)"
                     msg += f"\n\nExamples: {preview}"
 
-                self.after(0, lambda: messagebox.showinfo("Cache Cleared", msg))
+                self.after(0, lambda: self.show_toast(msg, "success", duration=6000))
                 self.after(0, lambda: self.update_dl_status("Cache cleared.", "#2ecc71"))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Cache Clear Error", str(e)))
@@ -3250,7 +3562,7 @@ class UniversalAudioStudio(ctk.CTk):
 
     def play_preview(self):
         if not self.studio_file_path:
-            messagebox.showwarning("File Missing", "Please load an audio file first.")
+            self.show_toast("Please load an audio file first.", "warning")
             return
         if _lazy_import_sounddevice() is None:
             messagebox.showerror("Module Missing", "sounddevice package missing.")
