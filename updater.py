@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -274,7 +275,7 @@ def macos_download_url(release, machine=None):
     """
     if not release:
         return None
-    suffix = MACOS_DMG_SUFFIXES.get(macos_arch(machine))
+    suffix = MACOS_DMG_SUFFIXES.get(macos_arch(machine) or "")
     if not suffix:
         return None
 
@@ -283,6 +284,21 @@ def macos_download_url(release, machine=None):
         if name.lower().endswith(suffix) and (not version or version in name):
             return url
     return None
+
+
+def available_update(release):
+    """Return the URL this machine could actually update *from*, or ``None``.
+
+    Windows needs the packaged self-update ZIP; a Mac needs a ``.dmg`` for its
+    own architecture. A Release carrying neither is not an update *for this
+    machine*, so nothing should be offered - otherwise a Windows-only release
+    nags every Mac and opens a page with no Mac build on it.
+    """
+    if not release:
+        return None
+    if self_update_supported():
+        return release.get("download_url") or None
+    return macos_download_url(release)
 
 
 def get_remote_update_info():
@@ -341,7 +357,7 @@ def _get_updater_cli_path():
     """
     candidates = []
     if hasattr(sys, "_MEIPASS"):
-        candidates.append(os.path.join(sys._MEIPASS, "updater_cli.exe"))
+        candidates.append(os.path.join(getattr(sys, "_MEIPASS"), "updater_cli.exe"))
     exe_dir = os.path.dirname(os.path.abspath(sys.executable or ""))
     if exe_dir:
         candidates.append(os.path.join(exe_dir, "updater_cli.exe"))
@@ -398,6 +414,36 @@ def self_update_supported() -> bool:
     return os.name == "nt"
 
 
+def _prepare_updater_helper(updater_cli: str) -> str:
+    """Copy the updater somewhere outside the install and return that path.
+
+    The app finds ``updater_cli.exe`` inside its own bundle, and running it from
+    there costs four files on every update. Windows refuses to replace a running
+    EXE, and it loads a process's DLLs from that process's own directory - so
+    while the updater ran from ``_internal``, ``updater_cli.exe``, ``python3.dll``
+    and both ``VCRUNTIME140*.dll`` were locked for the whole install, however long
+    it retried. Every update ended as "UPDATE INCOMPLETE: 4 failed", and a fix to
+    the updater could never reach an installed copy - the updater was the one
+    thing the updater could not update.
+
+    Running from a temporary copy frees all four. Falls back to the original path
+    unchanged if the copy cannot be made, so a locked-down temp directory cannot
+    stop the update from happening.
+    """
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="uas-updater-")
+        copy_path = os.path.join(temp_dir, os.path.basename(updater_cli))
+        shutil.copy2(updater_cli, copy_path)
+        logger.info("Updater copied to %s so it can replace itself", copy_path)
+        return copy_path
+    except OSError as e:
+        logger.warning(
+            "Could not copy the updater out of %s (%s); running it in place",
+            os.path.dirname(updater_cli), e,
+        )
+        return updater_cli
+
+
 def launch_updater(old_exe_path, new_exe_path, parent_pid, extra_args=None):
     """Spawn the updater subprocess then return True.
 
@@ -425,10 +471,15 @@ def launch_updater(old_exe_path, new_exe_path, parent_pid, extra_args=None):
     if extra_args:
         args.extend(extra_args)
 
+    # Launch it from outside the install directory. Running the helper from
+    # inside the bundle locks the files it is about to replace - see
+    # _prepare_updater_helper for the four that never made it.
+    helper = _prepare_updater_helper(updater_cli)
+
     app_dir = os.path.dirname(os.path.abspath(old_exe_path))
     if _dir_is_writable(app_dir):
         try:
-            subprocess.Popen([updater_cli, *args], close_fds=True)
+            subprocess.Popen([helper, *args], close_fds=True)
             return True
         except Exception as e:
             logger.error("Failed to launch updater: %s", e)
@@ -436,7 +487,7 @@ def launch_updater(old_exe_path, new_exe_path, parent_pid, extra_args=None):
 
     # Protected location (Program Files, ...): the updater needs admin rights.
     logger.info("Install dir not writable (%s); requesting elevation.", app_dir)
-    if _run_elevated(updater_cli, args):
+    if _run_elevated(helper, args):
         return True
     logger.warning("Updater elevation declined or failed.")
     return False

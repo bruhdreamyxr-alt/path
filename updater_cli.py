@@ -28,12 +28,16 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 
 LOG_PATH = os.path.join(
     os.environ.get("TEMP", os.path.expanduser("~")), "updater_cli.log"
 )
+
+# Set on the relocated copy of this updater so it never relocates itself again.
+_RELOCATED_ENV = "UAS_UPDATER_RELOCATED"
 
 
 def _log(message: str) -> None:
@@ -111,6 +115,50 @@ def _copy_member(zf, member, target):
     if member.file_size and written != member.file_size:
         return f"short write ({written} of {member.file_size} bytes)"
     return None
+
+
+def _relocate_if_inside_app(app_dir: str) -> bool:
+    """Re-run this updater from outside *app_dir*, and report whether it did.
+
+    A safety net for the case where something launches the copy inside the
+    install directly. Windows will not replace a running EXE, and it resolves a
+    process's DLLs from that process's own directory, so an updater running from
+    ``_internal`` keeps ``updater_cli.exe``, ``python3.dll`` and both
+    ``VCRUNTIME140*.dll`` locked for as long as it runs - the update finishes as
+    "UPDATE INCOMPLETE" and the updater itself never improves.
+
+    The app also relocates the helper before launching it (see
+    ``updater._prepare_updater_helper``), so in practice this rarely fires; it
+    exists so the behaviour does not depend on the app being up to date.
+
+    Returns True when a relocated copy has been started, in which case the
+    caller should exit without doing any work.
+    """
+    if os.environ.get(_RELOCATED_ENV) == "1":
+        return False  # already relocated once; never loop
+
+    try:
+        running = os.path.normpath(os.path.abspath(sys.executable))
+        app_dir = os.path.normpath(os.path.abspath(app_dir))
+    except Exception:
+        return False
+
+    if not running.lower().startswith(app_dir.lower() + os.sep):
+        return False
+
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="uas-updater-")
+        relocated = os.path.join(temp_dir, os.path.basename(running) or "updater_cli.exe")
+        shutil.copy2(running, relocated)
+        env = dict(os.environ)
+        env[_RELOCATED_ENV] = "1"
+        subprocess.Popen([relocated, *sys.argv[1:]], close_fds=True, env=env)
+    except OSError as e:
+        _log(f"Could not relocate out of {app_dir} ({e}); continuing in place")
+        return False
+
+    _log(f"Relocated to {relocated} so the files in {app_dir} can be replaced")
+    return True
 
 
 def _extract_zip_into(package_path: str, app_dir: str, retry_seconds: int = 120):
@@ -266,6 +314,11 @@ def main():
     restart_args = sys.argv[5:] if len(sys.argv) > 5 else []
 
     app_dir = os.path.dirname(os.path.abspath(old_exe))
+
+    # Never work from inside the directory being replaced - see
+    # _relocate_if_inside_app. A relocated copy repeats everything below.
+    if _relocate_if_inside_app(app_dir):
+        sys.exit(0)
 
     # If the install dir refuses writes and we are not elevated, hand off to
     # an elevated copy of ourselves (UAC). That instance redoes this whole

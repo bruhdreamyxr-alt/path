@@ -253,6 +253,18 @@ class DownloadQueue:
     def items(self):
         with self._lock: return list(self._items)
 
+    @property
+    def is_running(self) -> bool:
+        """True while the queue's worker thread is draining it.
+
+        ui.py reads this both as a click-handler guard (`queue.is_running`)
+        and as the Active/Idle indicator in the queue tab, and only calls
+        start() when it is False. _running is set by start() and cleared by
+        _process_queue() once the queue empties; this property is a
+        read-only view and never starts work.
+        """
+        return self._running
+
     def remove_at(self, index: int) -> bool:
         """Remove the item at *index* (only when not currently active).
 

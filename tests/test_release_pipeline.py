@@ -12,7 +12,10 @@ These cover what changed when updates moved off Google Drive:
   earlier version of it to one machine and would have broken any cloud build.
 """
 import os
+import re
+import shutil
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -162,6 +165,7 @@ class RemoteUpdateInfoTests(unittest.TestCase):
         with mock.patch.object(updater, "_request_json",
                                return_value=_release_payload()):
             info = updater.get_remote_update_info()
+        assert info is not None  # the fixture payload is always usable
         self.assertEqual(set(info), {"version", "download_url"})
 
 
@@ -222,11 +226,24 @@ class ReleaseWorkflowTests(unittest.TestCase):
         """pedalboard publishes no cp314 macOS x86_64 wheel.
 
         Moving the macOS job to 3.14 would build the Apple Silicon app and fail
-        the Intel one, which is exactly what happened before.
+        the Intel one, which is exactly what happened before. Exact patch pins
+        (3.13.15) are fine - only the minor version matters here.
         """
         text = _read(".github/workflows/release.yml")
-        self.assertIn("PYTHON_MACOS: '3.13'", text)
-        self.assertIn("PYTHON_WINDOWS: '3.14'", text)
+        self.assertRegex(text, r"PYTHON_MACOS: '3\.13(\.\d+)?'")
+        self.assertRegex(text, r"PYTHON_WINDOWS: '3\.14(\.\d+)?'")
+
+    def test_the_python_pins_are_exact_patch_versions(self):
+        """A bare '3.13' silently moves to a new patch release over time, so two
+        builds of the same commit can use different interpreters - the kind of
+        drift that only shows up later as a mysterious behaviour change."""
+        text = _read(".github/workflows/release.yml")
+        for key in ("PYTHON_MACOS", "PYTHON_WINDOWS"):
+            match = re.search(r"%s: '([^']+)'" % key, text)
+            self.assertIsNotNone(match, "%s is not set in the workflow" % key)
+            assert match is not None  # assertIsNotNone doesn't narrow for type checkers
+            self.assertRegex(match.group(1), r"^3\.\d+\.\d+$",
+                             "%s should pin an exact patch version" % key)
 
     def test_the_version_check_guards_the_release_filenames(self):
         self.assertIn("does not match version.py",
@@ -367,6 +384,7 @@ class RemoteReleaseTests(unittest.TestCase):
         with mock.patch.object(updater, "_request_json",
                                return_value=_release_payload()):
             release = updater.get_remote_release()
+        assert release is not None  # the fixture payload is always usable
         self.assertEqual(release["version"], "2.1.0")
         self.assertIn("UniversalAudioStudio-2.1.0-arm64.dmg", release["assets"])
         self.assertIn("UniversalAudioStudio-2.1.0-x86_64.dmg", release["assets"])
@@ -384,6 +402,7 @@ class RemoteReleaseTests(unittest.TestCase):
         ])
         with mock.patch.object(updater, "_request_json", return_value=payload):
             release = updater.get_remote_release()
+            assert release is not None  # the fixture payload is always usable
             self.assertEqual(release["version"], "2.1.0")
             self.assertIsNone(release["download_url"])
             self.assertIsNone(updater.get_remote_update_info())
@@ -404,6 +423,7 @@ class RemoteReleaseTests(unittest.TestCase):
         ])
         with mock.patch.object(updater, "_request_json", return_value=payload):
             release = updater.get_remote_release()
+        assert release is not None  # the fixture payload is always usable
         self.assertEqual(release["assets"], {"good_2.1.0_update.zip": "https://x/ok"})
         self.assertEqual(release["download_url"], "https://x/ok")
 
@@ -431,6 +451,14 @@ class MacUiWiringTests(unittest.TestCase):
         self.assertIn("updater.macos_download_url", source)
         self.assertIn("updater.RELEASES_PAGE", source)
 
+    def test_macs_are_only_told_about_releases_with_a_mac_build(self):
+        """A Windows-only release must not be reported to Macs at all."""
+        source = _read("ui.py")
+        # The startup check uses the platform-aware gate...
+        self.assertIn("updater.available_update(release)", source)
+        # ...and the button path refuses a release with no Mac build.
+        self.assertIn("if not updater.macos_download_url(release):", source)
+
 
 class FallbackToAnOlderReleaseTests(unittest.TestCase):
     """A Release exists before its files do.
@@ -455,6 +483,7 @@ class FallbackToAnOlderReleaseTests(unittest.TestCase):
                     self.EMPTY_LATEST,
                     [self.EMPTY_LATEST, _release_payload(tag="v2.1.0")])):
             info = updater.get_remote_update_info()
+        assert info is not None  # the fallback always returns a usable dict here
         self.assertEqual(info["version"], "2.1.0")
         self.assertEqual(info["download_url"], "https://example.invalid/update.zip")
 
@@ -488,9 +517,103 @@ class FallbackToAnOlderReleaseTests(unittest.TestCase):
         with mock.patch.object(updater, "_request_json",
                                return_value=self.EMPTY_LATEST) as request:
             release = updater.get_remote_release()
+        assert release is not None  # the fixture payload is always usable
         self.assertEqual(release["version"], "2.1.1")
         self.assertIsNone(release["download_url"])
         self.assertEqual(request.call_count, 1)
+
+
+class AvailableUpdateTests(unittest.TestCase):
+    """A release is only an "update" if this machine can actually use it.
+
+    A Windows-only release used to be reported to Macs, which were then offered
+    a Release page containing no Mac build at all.
+    """
+
+    def _release(self, with_zip=True, with_dmg=True):
+        assets = {}
+        if with_zip:
+            assets["UniversalAudioStudio_2.1.3_update.zip"] = "https://x/zip"
+        if with_dmg:
+            assets["UniversalAudioStudio-2.1.3-arm64.dmg"] = "https://x/arm64"
+            assets["UniversalAudioStudio-2.1.3-x86_64.dmg"] = "https://x/intel"
+        return {"version": "2.1.3",
+                "download_url": assets.get("UniversalAudioStudio_2.1.3_update.zip"),
+                "assets": assets}
+
+    def test_windows_uses_the_self_update_package(self):
+        with mock.patch.object(updater.os, "name", "nt"):
+            self.assertEqual(updater.available_update(self._release()),
+                             "https://x/zip")
+
+    def test_a_mac_uses_its_own_disk_image(self):
+        with mock.patch.object(updater.os, "name", "posix"), \
+             mock.patch.object(updater.platform, "machine", lambda: "arm64"):
+            self.assertEqual(updater.available_update(self._release()),
+                             "https://x/arm64")
+
+    def test_a_windows_only_release_is_nothing_to_a_mac(self):
+        with mock.patch.object(updater.os, "name", "posix"), \
+             mock.patch.object(updater.platform, "machine", lambda: "arm64"):
+            self.assertIsNone(
+                updater.available_update(self._release(with_dmg=False)))
+
+    def test_a_mac_only_release_is_nothing_to_windows(self):
+        with mock.patch.object(updater.os, "name", "nt"):
+            self.assertIsNone(
+                updater.available_update(self._release(with_zip=False)))
+
+    def test_an_empty_or_missing_release_is_nothing_to_anyone(self):
+        for release in (None, {}, {"version": "2.1.3", "assets": {}}):
+            for platform_name in ("nt", "posix"):
+                with self.subTest(release=release, platform=platform_name):
+                    with mock.patch.object(updater.os, "name", platform_name), \
+                         mock.patch.object(updater.platform, "machine",
+                                           lambda: "arm64"):
+                        self.assertIsNone(updater.available_update(release))
+
+    def test_a_mac_whose_architecture_is_unknown_gets_nothing(self):
+        with mock.patch.object(updater.os, "name", "posix"), \
+             mock.patch.object(updater.platform, "machine", lambda: "sparc"):
+            self.assertIsNone(updater.available_update(self._release()))
+
+
+class UpdaterRelocationTests(unittest.TestCase):
+    """The app must not launch the updater from inside the install directory.
+
+    Running it from ``_internal`` kept updater_cli.exe, python3.dll and both
+    VCRUNTIME140 DLLs locked for the whole update: "UPDATE INCOMPLETE: 4 failed"
+    on every release, and the updater unable to update itself.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="uas-helper-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.source = os.path.join(self.tmp, "app", "_internal", "updater_cli.exe")
+        os.makedirs(os.path.dirname(self.source))
+        with open(self.source, "wb") as fh:
+            fh.write(b"MZ updater")
+
+    def _prepare(self):
+        copy_path = updater._prepare_updater_helper(self.source)
+        if copy_path != self.source:
+            self.addCleanup(shutil.rmtree, os.path.dirname(copy_path), True)
+        return copy_path
+
+    def test_the_copy_lives_outside_the_original_directory(self):
+        copy_path = self._prepare()
+        self.assertNotEqual(os.path.dirname(copy_path), os.path.dirname(self.source))
+
+    def test_the_copy_is_identical(self):
+        copy_path = self._prepare()
+        with open(copy_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"MZ updater")
+
+    def test_a_copy_failure_falls_back_to_the_original(self):
+        """A locked-down temp directory must not stop the update happening."""
+        with mock.patch.object(updater.shutil, "copy2", side_effect=OSError("denied")):
+            self.assertEqual(updater._prepare_updater_helper(self.source),
+                             self.source)
 
 
 if __name__ == "__main__":

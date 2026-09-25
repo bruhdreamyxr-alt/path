@@ -10,7 +10,7 @@ import queue
 import logging
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import sys
 import ctypes
 
@@ -77,7 +77,7 @@ def _lazy_import_numpy():
             pass
     return _np
 
-def _lazy_import_vlc():
+def _lazy_import_vlc() -> Any:
     global _vlc
     if _vlc is None:
         try:
@@ -440,8 +440,10 @@ class UniversalAudioStudio(ctk.CTk):
         return defaults
 
     def _save_prefs(self) -> None:
+        # Resolve the path outside the try: the except handler logs with it,
+        # so it must be bound even if the very first operation fails.
+        path = self._pref_path
         try:
-            path = self._pref_path
             tmp_path = path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._prefs, f, indent=2)
@@ -610,6 +612,16 @@ class UniversalAudioStudio(ctk.CTk):
         except Exception:
             pass
 
+        # Build the UI with the window hidden, then reveal it once at the end.
+        # While it is mapped, Tk does geometry and redraw work for each of the
+        # ~112 widgets as they are added, which is the largest single cost of
+        # starting up - and it means the user watches a half-drawn window
+        # assemble itself. customtkinter's withdraw() is written for exactly
+        # this: it notes the window was never shown and re-shows it on the
+        # first update()/mainloop(). We also reveal it explicitly at the end so
+        # this never depends on that behaviour staying.
+        self.withdraw()
+
         # -----------------
         # UI Preferences
         # -----------------
@@ -638,6 +650,7 @@ class UniversalAudioStudio(ctk.CTk):
         self._vlc_instance = None
         self._vlc_player = None
         self._preview_proc = None
+        self._preview_via_sd = False
         self._clipper_vlc_instance = None
         self._clipper_vlc_player = None
         self._clipper_auto_select = False
@@ -655,11 +668,6 @@ class UniversalAudioStudio(ctk.CTk):
         self.configure(bg=bg_color, highlightthickness=0, bd=0)
         try:
             self.attributes('-bg', bg_color)
-        except Exception:
-            pass
-        # Also set via Tkinter's configure to ensure it sticks
-        try:
-            self.tk.configure(bg=bg_color)
         except Exception:
             pass
 
@@ -793,10 +801,15 @@ class UniversalAudioStudio(ctk.CTk):
         # Start by showing downloader
         self.show_frame('downloader')
 
+        # Everything exists now. Resolve the layout in one pass and show the
+        # finished window, instead of letting Tk reveal it widget by widget.
+        self.update_idletasks()
+        self.deiconify()
+
     def _start_worker(self, target):
         threading.Thread(target=target, daemon=True).start()
 
-    def after(self, ms, func=None, *args, **kwargs):
+    def after(self, ms, func=None, *args, **kwargs):  # type: ignore[reportIncompatibleMethodOverride]
         """Thread-safe ``after``: worker threads never touch Tk directly.
 
         Calls made on the Tk owner (main) thread pass through to the normal
@@ -1791,6 +1804,17 @@ class UniversalAudioStudio(ctk.CTk):
                                 f"You already have the latest version ({local_ver}).\n"
                                 "No update needed.")
             return
+        if not updater.macos_download_url(release):
+            # Newer, but it ships no Mac build - a Windows-only release. Say so
+            # plainly instead of offering a download that does not exist, and
+            # never let it turn into a recurring prompt.
+            self.update_dl_status(f"Up to date (v{local_ver}).", "#27ae60")
+            messagebox.showinfo(
+                "No Mac Update",
+                f"Version {remote_ver} has been released, but it contains no "
+                f"macOS build.\n\nYou already have the newest Mac version "
+                f"({local_ver}).")
+            return
         self.update_dl_status(f"Update available (v{remote_ver}).", "#f39c12")
         self._offer_macos_download(local_ver, release)
 
@@ -1848,9 +1872,10 @@ class UniversalAudioStudio(ctk.CTk):
 
                 if not updater.is_newer_version(release["version"]):
                     return
-                # Windows installs from the packaged ZIP, so without it there is
-                # nothing to offer. A Mac only needs the version and a disk image.
-                if updater.self_update_supported() and not release.get("download_url"):
+                # Only prompt when this platform can do something with it:
+                # Windows needs the packaged ZIP, a Mac needs a .dmg for its own
+                # architecture. A Windows-only release must not nag Macs.
+                if not updater.available_update(release):
                     return
                 download_queue._mark_update_check_done('app')
 
@@ -1868,6 +1893,10 @@ class UniversalAudioStudio(ctk.CTk):
 
         remote_ver = (release or {}).get("version", "?")
         if not updater.self_update_supported():
+            if not updater.macos_download_url(release):
+                # A Windows-only release: nothing this Mac can use, so stay
+                # silent rather than prompting about it.
+                return
             # macOS: the dialog below promises a Windows UAC prompt and an
             # automatic relaunch, neither of which exists here, so offer the
             # download instead.
@@ -2022,7 +2051,10 @@ class UniversalAudioStudio(ctk.CTk):
                         "Could not stream a preview (ffmpeg returned an error). "
                         "The video may not allow previews."
                     )
-                data = _np.frombuffer(raw, dtype=_np.float32).reshape(-1, 2)
+                # ffmpeg's stdout is bytes at runtime; tolerate the str that
+                # some Popen overload resolutions may infer here.
+                pcm = raw if isinstance(raw, bytes) else raw.encode()
+                data = _np.frombuffer(pcm, dtype=_np.float32).reshape(-1, 2)
                 _sd.play(data, 44100)
                 _sd.wait()
             except Exception as e:
@@ -3089,61 +3121,9 @@ class UniversalAudioStudio(ctk.CTk):
             except Exception:
                 pass
 
-    def apply_opacity_toggle(self):
-        enabled = bool(self.opacity_var.get())
-        self._set_pref('opacity_enabled', enabled)
-        try:
-            if enabled:
-                val = float(self.opacity_slider.get())
-                self._set_pref('opacity_alpha', val)
-                self._apply_window_alpha(val)
-            else:
-                self._apply_window_alpha(1.0)
-        except Exception:
-            pass
-
-    def set_window_opacity(self, val):
-        try:
-            val_float = float(val)
-            if self.opacity_var.get():
-                self._set_pref('opacity_alpha', val_float)
-                self._apply_window_alpha(val_float)
-        except Exception:
-            pass
-
     def change_appearance_mode(self, mode):
         ctk.set_appearance_mode(mode)
         self._set_pref('theme_mode', mode)
-
-    def _on_disable_max_toggle(self):
-        try:
-            val = bool(self.disable_max_var.get())
-            self._set_pref('disable_maximize', val)
-            self._disable_maximize(val)
-        except Exception:
-            pass
-
-    def change_color_theme(self, theme):
-        self._set_pref('accent_theme', theme)
-
-        try:
-            ctk.set_default_color_theme(theme)
-        except FileNotFoundError:
-            try:
-                ctk.set_default_color_theme("blue")
-                messagebox.showwarning("Theme Not Found", f"Theme '{theme}' not found. Reverted to 'blue'.")
-                if hasattr(self, 'color_option'):
-                    self.color_option.set("blue")
-            except Exception:
-                pass
-        except Exception as e:
-            try:
-                ctk.set_default_color_theme("blue")
-                messagebox.showwarning("Theme Error", f"Could not apply theme '{theme}': {e}\nReverted to 'blue'.")
-                if hasattr(self, 'color_option'):
-                    self.color_option.set("blue")
-            except Exception:
-                pass
 
     def load_background_gif(self):
         if Image is None:

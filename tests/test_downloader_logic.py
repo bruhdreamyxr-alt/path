@@ -140,7 +140,7 @@ class ProducedMediaFileTests(unittest.TestCase):
         self._touch("track.mp3", 1_000)
         self._touch("track.webp", 2_000)
         self.assertEqual(
-            os.path.basename(downloader.pick_produced_media_file(self.folder)),
+            os.path.basename(downloader.pick_produced_media_file(self.folder) or ""),
             "track.mp3",
         )
 
@@ -150,7 +150,7 @@ class ProducedMediaFileTests(unittest.TestCase):
         self._touch("track.mp3", 1_000)
         self._touch("track2.mp3", 5_000)
         self.assertEqual(
-            os.path.basename(downloader.pick_produced_media_file(self.folder)),
+            os.path.basename(downloader.pick_produced_media_file(self.folder) or ""),
             "track2.mp3",
         )
 
@@ -158,7 +158,7 @@ class ProducedMediaFileTests(unittest.TestCase):
         self._touch("older.mp3", 1_000)
         self._touch("newer.mp3", 2_000)
         self.assertEqual(
-            os.path.basename(downloader.pick_produced_media_file(self.folder)),
+            os.path.basename(downloader.pick_produced_media_file(self.folder) or ""),
             "newer.mp3",
         )
 
@@ -167,7 +167,7 @@ class ProducedMediaFileTests(unittest.TestCase):
         self._touch("previous.mp3", 9_000)
         self._touch("fresh.mp3", 1_000)
         picked = downloader.pick_produced_media_file(self.folder, {"previous.mp3"})
-        self.assertEqual(os.path.basename(picked), "fresh.mp3")
+        self.assertEqual(os.path.basename(picked or ""), "fresh.mp3")
 
     def test_returns_none_when_nothing_new_appeared(self):
         self._touch("already.mp3", 1_000)

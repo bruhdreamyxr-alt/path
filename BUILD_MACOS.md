@@ -27,8 +27,8 @@ only have to push.
    have it, then open it and sign in as **bruhdreamyxr-alt** (the account that
    owns the repository).
 2. Menu **File -> Add local repository...**
-3. Paste the path (it is already on your clipboard):
-   `C:\Users\antho\Downloads\scripts\path`
+3. Paste the path to this folder, for example:
+   `C:\Users\<you>\Downloads\scripts\path`
 4. GitHub Desktop lists the repository with commits waiting to push.
 5. Click **Push origin** at the top. The upload takes a minute or two.
 

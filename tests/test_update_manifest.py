@@ -24,9 +24,9 @@ TOOLS_DIR = os.path.join(PROJECT_DIR, "tools")
 sys.path.insert(0, PROJECT_DIR)
 sys.path.insert(0, TOOLS_DIR)
 
-import make_update_manifest  # noqa: E402
+import make_update_manifest  # noqa: E402  # type: ignore[reportMissingImports]
 import updater  # noqa: E402
-from get_version import get_version  # noqa: E402
+from get_version import get_version  # noqa: E402  # type: ignore[reportMissingImports]
 
 ZIP_NAME = "UniversalAudioStudio_2.1.0_update.zip"
 

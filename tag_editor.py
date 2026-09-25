@@ -4,6 +4,26 @@ import os
 
 logger = logging.getLogger("universal_audio_studio.tag_editor")
 
+from typing import Any
+
+# Optional-dependency names are declared up front (typed Any) so a failed
+# import below doesn't make every use "possibly unbound" for type checkers.
+# Runtime behaviour is unchanged: mutagen uses stay behind HAS_MUTAGEN, and
+# a missing tkinter/customtkinter still fails at class definition time.
+ctk: Any = None
+filedialog: Any = None
+messagebox: Any = None
+MP3: Any = None
+ID3: Any = None
+TIT2: Any = None
+TPE1: Any = None
+TALB: Any = None
+TCON: Any = None
+TDRC: Any = None
+APIC: Any = None
+FLAC: Any = None
+Picture: Any = None
+
 try:
     import mutagen
     from mutagen.mp3 import MP3
@@ -114,6 +134,7 @@ class TagEditorDialog(ctk.CTkToplevel):
                 audio = MP3(self.filepath, ID3=ID3)
                 if audio.tags is None: audio.add_tags()
                 t = audio.tags
+                assert t is not None  # add_tags() above guarantees tags exist now
                 for k, cls in [('title', TIT2), ('artist', TPE1), ('album', TALB), ('genre', TCON), ('year', TDRC)]:
                     if vals[k]: t.add(cls(encoding=3, text=vals[k]))
                 if self._cover_data:

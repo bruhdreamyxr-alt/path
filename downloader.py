@@ -3137,7 +3137,9 @@ def download_video_mp4(
             except Exception:
                 pass
 
-            # First fallback: try to discover direct media URLs on the page and download them directly.
+        # First fallback: try to discover direct media URLs on the page and download them directly.
+        # Bound here (not inside either try) so both fallbacks below can use it.
+        output_template = os.path.join(download_folder, '%(title)s.%(ext)s')
         try:
             status_callback("Primary download failed. Searching page for direct media URLs...", "#f39c12")
             try:
@@ -3166,8 +3168,6 @@ def download_video_mp4(
                 if u not in seen:
                     seen.add(u)
                     candidates.append(u)
-
-            output_template = os.path.join(download_folder, '%(title)s.%(ext)s')
 
             for stream_url in candidates:
                 try:

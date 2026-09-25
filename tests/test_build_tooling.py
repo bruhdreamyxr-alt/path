@@ -23,8 +23,8 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(PROJECT_DIR, "tools")
 sys.path.insert(0, TOOLS_DIR)
 
-import check_mac_wheels  # noqa: E402
-import get_version  # noqa: E402
+import check_mac_wheels  # noqa: E402  # type: ignore[reportMissingImports]
+import get_version  # noqa: E402  # type: ignore[reportMissingImports]
 
 _SHELL_SCRIPTS = ("tools/build_macos.sh", "tools/fetch_mac_helpers.sh")
 _VERSION_PATTERN = r'__version__\s*=\s*["\']([^"\']+)'
@@ -35,7 +35,9 @@ class VersionHelperTests(unittest.TestCase):
 
     def test_matches_version_py(self):
         with open(os.path.join(PROJECT_DIR, "version.py"), encoding="utf-8") as fh:
-            expected = re.search(_VERSION_PATTERN, fh.read()).group(1)
+            match = re.search(_VERSION_PATTERN, fh.read())
+            assert match is not None  # version.py always carries __version__
+            expected = match.group(1)
         self.assertEqual(get_version.get_version(), expected)
         self.assertRegex(expected, r"^\d+\.\d+\.\d+$")
 

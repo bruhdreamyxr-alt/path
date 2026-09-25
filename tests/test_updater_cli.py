@@ -136,6 +136,7 @@ class CopyMemberTests(UpdaterCliTestCase):
         finally:
             updater_cli.shutil.copyfileobj = original
         self.assertIsNotNone(error)
+        assert error is not None  # the copy above is expected to produce one
         self.assertIn("short write", error)
 
 
@@ -228,6 +229,69 @@ class ExtractZipTests(UpdaterCliTestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "escaped.txt")))
         self.assertEqual(self.read("ok.txt"), "fine")
         self.assertIn("Refusing to extract", self.log_text())
+
+
+class RelocationTests(UpdaterCliTestCase):
+    """The updater must not work from inside the directory it replaces.
+
+    Windows will not replace a running EXE, and it resolves a process's DLLs
+    from that process's own directory. While the updater ran from ``_internal``,
+    four files stayed locked through all 120 retry passes - ``updater_cli.exe``,
+    ``python3.dll`` and both ``VCRUNTIME140*.dll`` - so every update ended as
+    "UPDATE INCOMPLETE" and the updater could never improve itself.
+    """
+
+    def _fake_running_exe(self, directory):
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "updater_cli.exe")
+        with open(path, "wb") as fh:
+            fh.write(b"MZ fake")
+        return path
+
+    def _clear_flag(self):
+        os.environ.pop(updater_cli._RELOCATED_ENV, None)
+
+    def test_running_from_inside_the_install_relocates(self):
+        running = self._fake_running_exe(os.path.join(self.app_dir, "_internal"))
+        self._clear_flag()
+        with mock.patch.object(updater_cli.sys, "executable", running), \
+             mock.patch.object(updater_cli.subprocess, "Popen") as popen:
+            self.assertTrue(updater_cli._relocate_if_inside_app(self.app_dir))
+
+        self.assertEqual(popen.call_count, 1)
+        argv = popen.call_args[0][0]
+        self.addCleanup(shutil.rmtree, os.path.dirname(argv[0]), True)
+        self.assertTrue(os.path.isfile(argv[0]), "the copy must exist before it runs")
+        self.assertNotEqual(os.path.dirname(argv[0]), os.path.dirname(running),
+                            "the relocated copy must live outside the install")
+        self.assertEqual(popen.call_args[1]["env"][updater_cli._RELOCATED_ENV], "1")
+        self.assertIn("Relocated", self.log_text())
+
+    def test_the_root_copy_counts_as_inside_too(self):
+        """It is launched from either <app>\\ or <app>\\_internal\\."""
+        running = self._fake_running_exe(self.app_dir)
+        self._clear_flag()
+        with mock.patch.object(updater_cli.sys, "executable", running), \
+             mock.patch.object(updater_cli.subprocess, "Popen") as popen:
+            self.assertTrue(updater_cli._relocate_if_inside_app(self.app_dir))
+        argv = popen.call_args[0][0]
+        self.addCleanup(shutil.rmtree, os.path.dirname(argv[0]), True)
+
+    def test_a_relocated_run_never_relocates_again(self):
+        running = self._fake_running_exe(os.path.join(self.app_dir, "_internal"))
+        with mock.patch.dict(os.environ, {updater_cli._RELOCATED_ENV: "1"}), \
+             mock.patch.object(updater_cli.sys, "executable", running), \
+             mock.patch.object(updater_cli.subprocess, "Popen") as popen:
+            self.assertFalse(updater_cli._relocate_if_inside_app(self.app_dir))
+        self.assertEqual(popen.call_count, 0, "relocating twice would loop forever")
+
+    def test_running_from_outside_is_left_alone(self):
+        running = self._fake_running_exe(os.path.join(self.tmp, "elsewhere"))
+        self._clear_flag()
+        with mock.patch.object(updater_cli.sys, "executable", running), \
+             mock.patch.object(updater_cli.subprocess, "Popen") as popen:
+            self.assertFalse(updater_cli._relocate_if_inside_app(self.app_dir))
+        self.assertEqual(popen.call_count, 0)
 
 
 if __name__ == "__main__":

@@ -198,13 +198,14 @@ bash tools/build_macos.sh
 
 ## Known gaps
 
-* **Mac users are not told about updates.** The app could check the same
-  Releases API on macOS and offer to open the download page; it does not yet, so
-  you have to tell them yourself.
-* **`installer_config.iss`** is a leftover from Inno Setup's wizard (it produces
-  `mysetup.exe`). Nothing uses it; `installer_200.iss` is the real one.
-* **`flownet.bin` / `flownet.param`** (10.4 MB) are committed but referenced by
-  nothing.
+* **Macs are told about updates but do not install them.** The app reports the
+  new version and opens the `.dmg`; the user drags it over the old app in
+  Applications. Windows installs by itself. Macs would need a helper that swaps
+  the `.app` for true parity.
+* **Nothing is code-signed.** macOS makes every user right-click -> Open on
+  first launch, and Windows shows a SmartScreen warning on the installer. An
+  Apple Developer ID ($99/year) and a Windows code-signing certificate are the
+  only remaining thing that changes how the app feels to receive.
 
 ## If the build fails
 
