@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run TuneLab (ui.py)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/ui.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "justMyCode": true
+        }
+    ]
+}
