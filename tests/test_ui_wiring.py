@@ -139,6 +139,28 @@ class WindowGeometryTests(unittest.TestCase):
         self.assertIn("winfo_screenheight", body)
 
 
+class StartupRevealTests(unittest.TestCase):
+    """The window must be on screen when mainloop starts.
+
+    customtkinter 6.0 withdraws the window inside its own __init__ and again
+    on the first mainloop() (titlebar repaint), then skips its recovery
+    deiconify() whenever withdraw() ran before the window was flagged as
+    shown. Without a pump of update() after deiconify(), mainloop() runs
+    against a hidden window: no error, nothing visible.
+    """
+
+    def test_init_deiconifies_then_pumps_one_update(self):
+        body = _method_source("__init__")
+        deiconify = body.index("self.deiconify()")
+        update = body.index("self.update()", deiconify)
+        self.assertLess(
+            deiconify, update,
+            "ui.py must call update() after deiconify(); otherwise "
+            "customtkinter 6.0's first mainloop() leaves the window "
+            "withdrawn and the app starts hidden with no error.",
+        )
+
+
 class ShortcutTests(unittest.TestCase):
     def test_ctrl_digit_navigation_exists(self):
         src = _source()

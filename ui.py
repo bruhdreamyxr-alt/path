@@ -862,6 +862,15 @@ class UniversalAudioStudio(ctk.CTk):
         self._restore_window_geometry()
         self.update_idletasks()
         self.deiconify()
+        # customtkinter 6.0 withdraws the window inside its own __init__
+        # (titlebar repaint) and again on the first mainloop(), while its
+        # recovery deiconify() is skipped whenever withdraw() ran before the
+        # window was flagged as shown - which ours does above. Pumping one
+        # update() here flags the window as shown (its update() override
+        # sets _window_exists) and paints it once, so mainloop() takes no
+        # further window-state actions. Without this the app starts with a
+        # hidden window: mainloop runs, no error, nothing on screen.
+        self.update()
 
     def _start_worker(self, target):
         threading.Thread(target=target, daemon=True).start()
