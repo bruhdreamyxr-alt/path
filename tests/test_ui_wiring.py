@@ -8,8 +8,8 @@ and the queue row formatter.
 
 Each guard exists because the corresponding behaviour is invisible to the
 rest of the suite: a dropped Enter binding, a reintroduced repaint between
-map/unmap, or a full listbox rebuild per progress tick would all ship
-silently.
+map/unmap, or a full rebuild of the queue rows per progress tick would all
+ship silently.
 """
 import importlib.util
 import pathlib
@@ -25,11 +25,23 @@ def _source() -> str:
     return (_REPO / "ui.py").read_text(encoding="utf-8")
 
 
+def _class_source() -> str:
+    """The source of the app class only.
+
+    Scoped deliberately: _QueueRowList (a helper class) also defines an
+    ``__init__``, and the method regex below must keep resolving names
+    against UniversalAudioStudio, not whichever class comes first.
+    """
+    src = _source()
+    m = re.search(r"\nclass UniversalAudioStudio\(.*", src, re.DOTALL)
+    return m.group(0) if m else src
+
+
 def _method_source(name: str) -> str:
     """Return the source of the 4-space-indented method *name* (incl. docstring)."""
     m = re.search(
         r"\n    def %s\(.*?(?=\n    def |\n    @|\Z)" % re.escape(name),
-        _source(),
+        _class_source(),
         re.DOTALL,
     )
     assert m is not None, "ui.py has no method named %r" % name
@@ -278,7 +290,7 @@ class OpenFilePlatformTests(unittest.TestCase):
 
 
 class QueueRowLabelTests(unittest.TestCase):
-    """The queue listbox formatter is pure, so pin its rendering exactly."""
+    """The queue row formatter is pure, so pin its rendering exactly."""
 
     def setUp(self):
         if not _HAS_CTK:
@@ -314,6 +326,194 @@ class QueueRowLabelTests(unittest.TestCase):
     def test_unknown_status_gets_the_placeholder_icon(self):
         item = SimpleNamespace(status="weird", url="u")
         self.assertTrue(self.app._queue_row_label(0, item, 9).startswith("? "))
+
+
+class TypeTokenTests(unittest.TestCase):
+    """Fonts flow through UITheme.F — family/scale change in one place."""
+
+    def test_no_hardcoded_font_tuples_remain(self):
+        self.assertNotIn(
+            '("Segoe UI"', _source(),
+            "bypasses the platform-aware UITheme.F helper")
+
+    def test_font_helper_returns_a_platform_family_tuple(self):
+        if not _HAS_CTK:
+            self.skipTest("customtkinter not installed")
+        from ui import UITheme, _UI_FONT_FAMILY
+        self.assertEqual(UITheme.F(12), (_UI_FONT_FAMILY, 12))
+        self.assertEqual(UITheme.F(12, "bold"), (_UI_FONT_FAMILY, 12, "bold"))
+
+
+class ButtonPaletteTests(unittest.TestCase):
+    """Build sites pick button colors from the palette, not hex literals.
+
+    Hardcoded fills were the root of the rainbow: seven competing hues on
+    one screen, and any widget whose hex missed LEGACY_HEX_ROLES simply
+    ignored theme switches. _style_button roles replace all of it.
+    """
+
+    BUILD_METHODS = (
+        "build_downloader_view", "build_queue_view", "build_history_view",
+        "build_studio_view", "build_customization_view",
+        "build_performance_view", "_add_history_entry",
+    )
+
+    def test_no_hardcoded_fill_or_hover_hexes_at_build_sites(self):
+        for name in self.BUILD_METHODS:
+            body = _method_source(name)
+            for pat in ('fg_color="#', 'hover_color="#'):
+                self.assertNotIn(
+                    pat, body,
+                    "%s hardcodes %s — use _style_button(btn, role) so "
+                    "build-time colors follow the active palette" % (name, pat))
+
+    def test_style_button_tags_roles_for_later_theme_switches(self):
+        body = _method_source("_style_button")
+        self.assertIn("_theme_roles", body)
+        self.assertIn("self._BTN_ROLES", body)
+        src = _source()
+        for role in ('"primary":', '"secondary":', '"danger":'):
+            self.assertIn(role, src)
+
+    def test_styles_toasts_from_the_palette(self):
+        body = _method_source("show_toast")
+        self.assertIn("pal.get(role", body)
+        self.assertNotIn("colors = {", body)
+
+
+class PageTitleTests(unittest.TestCase):
+    """The header owns each page title; pages must not repeat it."""
+
+    def test_no_in_page_h1_titles(self):
+        src = _source()
+        for title in ("Media Downloader", "Download Queue",
+                      "Download History", "Appearance Settings"):
+            self.assertNotIn(
+                'text="%s"' % title, src,
+                "duplicate H1 — the header title_lbl already shows %r" % title)
+
+    def test_performance_scroll_does_not_repeat_the_header_title(self):
+        self.assertNotIn('label_text="Performance Settings"', _source())
+
+    def test_header_carries_a_live_status_slot(self):
+        self.assertIn("header_status_lbl", _source())
+        body = _method_source("update_dl_status")
+        self.assertIn("header_status_lbl", body)
+
+
+class MergedThemeControlTests(unittest.TestCase):
+    """One dropdown owns the theme; the palette owns Light/Dark."""
+
+    def test_the_redundant_mode_dropdown_is_gone(self):
+        src = _source()
+        self.assertNotIn("mode_option", src)
+        self.assertNotIn("Theme Mode:", src)   # the old label, colon and all
+        self.assertNotIn("change_appearance_mode", src)
+
+    def test_palette_mode_syncs_ctk_appearance(self):
+        body = _method_source("apply_color_theme")
+        self.assertIn("set_appearance_mode", body)
+        self.assertIn("'light'", body)
+
+
+class QueueRowThemingTests(unittest.TestCase):
+    """The queue list is themed CTk rows, not a raw tk.Listbox."""
+
+    def test_no_live_listbox_construction(self):
+        src = _source()
+        self.assertNotIn("tk.Listbox(", src)
+        self.assertIn("class _QueueRowList", src)
+
+    def test_rows_speak_the_listbox_api_the_refresh_logic_pins(self):
+        src = _source()
+        for api in ("def size(", "def insert(", "def delete(",
+                    "def get(", "def itemconfig(", "def curselection("):
+            self.assertIn(api, src)
+
+
+class StatusPillTests(unittest.TestCase):
+    """Download status reads as a pill (dot + text), not bare floating text."""
+
+    def test_dl_status_is_a_pill_with_a_colored_dot(self):
+        body = _method_source("build_downloader_view")
+        self.assertIn("_status_pill", body)
+        self.assertIn("_status_dot", body)
+
+    def test_status_updates_recolor_the_dot(self):
+        self.assertIn("_status_dot", _method_source("update_dl_status"))
+
+
+class ContrastTests(unittest.TestCase):
+    """WCAG AA: 'sub' and 'text' pass 4.5:1 on every surface they land on.
+
+    'sub' text sits on four different backgrounds across the app (page
+    bg, content surface, sidebar, cards) and on the queue panel
+    (sidebar_active) — all four must hold, per palette.
+    """
+
+    @staticmethod
+    def _lum(hexstr: str) -> float:
+        c = hexstr.lstrip("#")
+        if len(c) == 3:
+            c = "".join(ch * 2 for ch in c)
+        r, g, b = (int(c[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+        def lin(ch: float) -> float:
+            return ch / 12.92 if ch <= 0.03928 else ((ch + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+    @classmethod
+    def _ratio(cls, fg: str, bg: str) -> float:
+        a, b = cls._lum(fg), cls._lum(bg)
+        hi, lo = max(a, b), min(a, b)
+        return (hi + 0.05) / (lo + 0.05)
+
+    def test_sub_text_passes_aa_on_all_backgrounds(self):
+        if not _HAS_CTK:
+            self.skipTest("customtkinter not installed")
+        from ui import COLOR_THEMES
+        for name, pal in COLOR_THEMES.items():
+            for bg_key in ("bg", "surface", "sidebar", "sidebar_active"):
+                r = self._ratio(pal["sub"], pal[bg_key])
+                self.assertGreaterEqual(
+                    r, 4.5,
+                    "%s: sub on %s is %.2f:1 (needs 4.5)" % (name, bg_key, r))
+
+    def test_text_passes_aa_on_all_backgrounds(self):
+        if not _HAS_CTK:
+            self.skipTest("customtkinter not installed")
+        from ui import COLOR_THEMES
+        for name, pal in COLOR_THEMES.items():
+            for bg_key in ("bg", "surface", "sidebar", "sidebar_active"):
+                r = self._ratio(pal["text"], pal[bg_key])
+                self.assertGreaterEqual(
+                    r, 4.5,
+                    "%s: text on %s is %.2f:1 (needs 4.5)" % (name, bg_key, r))
+
+
+class OnColorPickerTests(unittest.TestCase):
+    """Filled buttons choose their label color by contrast, not fixed white."""
+
+    def setUp(self):
+        if not _HAS_CTK:
+            self.skipTest("customtkinter not installed")
+        from ui import _contrast, _on_color
+        self._contrast = _contrast
+        self._on_color = _on_color
+
+    def test_dark_text_wins_on_a_light_accent(self):
+        # Serika's yellow accent: dark bg text beats near-white text.
+        self.assertEqual(
+            self._on_color("#e2b714", "#ecf0f1", "#323437"), "#323437")
+
+    def test_light_text_wins_on_a_dark_fill(self):
+        self.assertEqual(
+            self._on_color("#2b2b2b", "#ecf0f1", "#1e1e24"), "#ecf0f1")
+
+    def test_contrast_extremes(self):
+        self.assertAlmostEqual(
+            self._contrast("#ffffff", "#000000"), 21.0, delta=0.1)
 
 
 if __name__ == "__main__":

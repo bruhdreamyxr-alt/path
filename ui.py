@@ -93,11 +93,76 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 
+# ---------------------------------------------------------------
+# Type + contrast helpers (module-level so tests can pin them)
+# ---------------------------------------------------------------
+# Segoe UI doesn't exist on macOS; Tk would silently fall back to a
+# default font there. Pick the platform's UI family once, here.
+_UI_FONT_FAMILY = "Helvetica Neue" if sys.platform == "darwin" else "Segoe UI"
+
+
+def _ui_font(size: int, *style: str) -> tuple:
+    """Build a Tk font tuple with the platform's UI family."""
+    return (_UI_FONT_FAMILY, size, *style)
+
+
+def _rel_luminance(color: str) -> float:
+    """WCAG relative luminance of a ``#rrggbb`` color (0.0 .. 1.0)."""
+    c = str(color).lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    try:
+        r, g, b = (int(c[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return 0.0
+
+    def _lin(ch: float) -> float:
+        return ch / 12.92 if ch <= 0.03928 else ((ch + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+
+
+def _contrast(fg: str, bg: str) -> float:
+    """WCAG contrast ratio between two colors (1.0 .. 21.0)."""
+    a, b = _rel_luminance(fg), _rel_luminance(bg)
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _on_color(bg: str, *candidates: str) -> str:
+    """Return the candidate with the best contrast against ``bg``.
+
+    Filled buttons pick their label color with this: the palette's text
+    color on dark fills, the palette's bg color on light/accent fills —
+    whichever reads better, instead of a fixed white that fails WCAG on
+    yellow/cyan accents.
+    """
+    if not candidates:
+        return "#ffffff"
+    best, best_ratio = candidates[0], 0.0
+    for cand in candidates:
+        ratio = _contrast(cand, bg)
+        if ratio > best_ratio:
+            best, best_ratio = cand, ratio
+    return best
+
+
 class UITheme:
     # Typography (base sizes; actual scaling handled by preferences)
-    TITLE_FONT = ("Segoe UI", 24, "bold")
-    SECTION_FONT = ("Segoe UI", 18, "bold")
-    BODY_FONT = ("Segoe UI", 12)
+    TITLE_FONT = _ui_font(24, "bold")
+    SECTION_FONT = _ui_font(18, "bold")
+    BODY_FONT = _ui_font(12)
+
+    @staticmethod
+    def F(size: int, *style: str) -> tuple:
+        """Type token: platform-correct font tuple for a base size.
+
+        Every widget font goes through here (``UITheme.F(12, "bold")``)
+        instead of a hard-coded font tuple, so the family or the size
+        scale changes in one place. Scaling still happens via
+        the ``font_scale`` preference / CTk widget scaling.
+        """
+        return _ui_font(size, *style)
 
     # Colors
     COLOR_PRIMARY = "#3498db"
@@ -118,6 +183,15 @@ class UITheme:
     PAD_Y_SMALL = 6
     PAD_Y_MED = 10
 
+    # Radius tokens: structural surfaces (content frame, cards) share the
+    # card radius; transient chrome (toasts, status pills) the medium one;
+    # small controls the small one. Keeps corners consistent per class
+    # instead of an ad-hoc 6/8/10/12/14/20 mix.
+    RADIUS_SM = 6
+    RADIUS_MD = 10
+    RADIUS_LG = 14
+    RADIUS_CARD = 20
+
     # Collapsible sidebar dimensions
     SB_W_EXPANDED = 176
     SB_W_COLLAPSED = 54
@@ -134,7 +208,7 @@ COLOR_THEMES = {
         'bg': '#1e1e24', 'surface': '#2b2b2b', 'sidebar': '#1b2532',
         'sidebar_active': '#2c3e50', 'hover': '#34495e',
         'accent': '#3498db', 'accent_hover': '#2980b9',
-        'text': '#ecf0f1', 'sub': '#95a5a6',
+        'text': '#ecf0f1', 'sub': '#9baaab',
         'success': '#27ae60', 'success_hover': '#229954',
         'warning': '#f39c12', 'warning_hover': '#d68910',
         'danger': '#e74c3c', 'danger_hover': '#c0392b',
@@ -145,7 +219,7 @@ COLOR_THEMES = {
         'bg': '#323437', 'surface': '#2c2e31', 'sidebar': '#2c2e31',
         'sidebar_active': '#3c4043', 'hover': '#3c4043',
         'accent': '#e2b714', 'accent_hover': '#c9a512',
-        'text': '#d1d0c5', 'sub': '#646669',
+        'text': '#d1d0c5', 'sub': '#a9aaad',
         'success': '#9ece6a', 'success_hover': '#86c05b',
         'warning': '#e0af68', 'warning_hover': '#c99a55',
         'danger': '#f7768e', 'danger_hover': '#dd6578',
@@ -156,7 +230,7 @@ COLOR_THEMES = {
         'bg': '#0f1220', 'surface': '#161b2c', 'sidebar': '#121728',
         'sidebar_active': '#202842', 'hover': '#1e2740',
         'accent': '#5b8cff', 'accent_hover': '#4a78e0',
-        'text': '#dde5f5', 'sub': '#5f6b85',
+        'text': '#dde5f5', 'sub': '#8590a8',
         'success': '#3fd08f', 'success_hover': '#36b67c',
         'warning': '#ffb454', 'warning_hover': '#e09c3f',
         'danger': '#ff5d73', 'danger_hover': '#e04f63',
@@ -167,7 +241,7 @@ COLOR_THEMES = {
         'bg': '#22243a', 'surface': '#2a2c46', 'sidebar': '#26283f',
         'sidebar_active': '#343655', 'hover': '#313350',
         'accent': '#b4b4fc', 'accent_hover': '#9c9ce8',
-        'text': '#e4e4f4', 'sub': '#7c7ea3',
+        'text': '#e4e4f4', 'sub': '#9fa1bc',
         'success': '#8fd6a4', 'success_hover': '#77bd8c',
         'warning': '#f0c987', 'warning_hover': '#d8b06c',
         'danger': '#ef8a9a', 'danger_hover': '#d76f81',
@@ -178,7 +252,7 @@ COLOR_THEMES = {
         'bg': '#2e3440', 'surface': '#333b4a', 'sidebar': '#2b313c',
         'sidebar_active': '#3b4252', 'hover': '#434c5e',
         'accent': '#88c0d0', 'accent_hover': '#74aec0',
-        'text': '#eceff4', 'sub': '#7f8ba0',
+        'text': '#eceff4', 'sub': '#a7afbe',
         'success': '#a3be8c', 'success_hover': '#90aa7b',
         'warning': '#ebcb8b', 'warning_hover': '#d4b574',
         'danger': '#bf616a', 'danger_hover': '#a8535c',
@@ -189,7 +263,7 @@ COLOR_THEMES = {
         'bg': '#282828', 'surface': '#32302f', 'sidebar': '#282828',
         'sidebar_active': '#3c3836', 'hover': '#45403d',
         'accent': '#fabd2f', 'accent_hover': '#e3a91c',
-        'text': '#ebdbb2', 'sub': '#928374',
+        'text': '#ebdbb2', 'sub': '#aca195',
         'success': '#b8bb26', 'success_hover': '#a4a71f',
         'warning': '#fe8019', 'warning_hover': '#e56f10',
         'danger': '#fb4934', 'danger_hover': '#e13c28',
@@ -200,7 +274,7 @@ COLOR_THEMES = {
         'bg': '#282a36', 'surface': '#2d2f3d', 'sidebar': '#21222c',
         'sidebar_active': '#44475a', 'hover': '#44475a',
         'accent': '#bd93f9', 'accent_hover': '#a67fd6',
-        'text': '#f8f8f2', 'sub': '#6272a4',
+        'text': '#f8f8f2', 'sub': '#aeb7d0',
         'success': '#50fa7b', 'success_hover': '#40d466',
         'warning': '#f1fa8c', 'warning_hover': '#d4dd72',
         'danger': '#ff5555', 'danger_hover': '#e04646',
@@ -211,7 +285,7 @@ COLOR_THEMES = {
         'bg': '#1a1b26', 'surface': '#1f2335', 'sidebar': '#16161e',
         'sidebar_active': '#24283b', 'hover': '#292e42',
         'accent': '#7aa2f7', 'accent_hover': '#668ad6',
-        'text': '#c0caf5', 'sub': '#565f89',
+        'text': '#c0caf5', 'sub': '#8890b4',
         'success': '#9ece6a', 'success_hover': '#86b655',
         'warning': '#e0af68', 'warning_hover': '#c8954f',
         'danger': '#f7768e', 'danger_hover': '#dd6078',
@@ -222,7 +296,7 @@ COLOR_THEMES = {
         'bg': '#1e1e2e', 'surface': '#25273a', 'sidebar': '#181825',
         'sidebar_active': '#313244', 'hover': '#45475a',
         'accent': '#89b4fa', 'accent_hover': '#7098d6',
-        'text': '#cdd6f4', 'sub': '#6c7086',
+        'text': '#cdd6f4', 'sub': '#979aab',
         'success': '#a6e3a1', 'success_hover': '#8ec688',
         'warning': '#f9e2af', 'warning_hover': '#dcc792',
         'danger': '#f38ba8', 'danger_hover': '#d6738f',
@@ -233,7 +307,7 @@ COLOR_THEMES = {
         'bg': '#fdf6e3', 'surface': '#eee8d5', 'sidebar': '#eee8d5',
         'sidebar_active': '#d6cdb7', 'hover': '#c9bfa5',
         'accent': '#268bd2', 'accent_hover': '#1f74b0',
-        'text': '#073642', 'sub': '#586e75',
+        'text': '#073642', 'sub': '#485a60',
         'success': '#859900', 'success_hover': '#6f8000',
         'warning': '#b58900', 'warning_hover': '#9a7500',
         'danger': '#dc322f', 'danger_hover': '#c22a27',
@@ -244,7 +318,7 @@ COLOR_THEMES = {
         'bg': '#fbf1c7', 'surface': '#f2e5bc', 'sidebar': '#f2e5bc',
         'sidebar_active': '#e5d4a8', 'hover': '#d6c594',
         'accent': '#b57614', 'accent_hover': '#9a6410',
-        'text': '#3c3836', 'sub': '#7c6f64',
+        'text': '#3c3836', 'sub': '#635850',
         'success': '#79740e', 'success_hover': '#65600b',
         'warning': '#af3a03', 'warning_hover': '#943002',
         'danger': '#9d0006', 'danger_hover': '#850005',
@@ -257,7 +331,7 @@ COLOR_THEMES = {
         'bg': '#272822', 'surface': '#2f3028', 'sidebar': '#24251f',
         'sidebar_active': '#3e3d32', 'hover': '#49483e',
         'accent': '#f92672', 'accent_hover': '#e01d61',
-        'text': '#f8f8f2', 'sub': '#75715e',
+        'text': '#f8f8f2', 'sub': '#aba796',
         'success': '#a6e22e', 'success_hover': '#92ca24',
         'warning': '#e6db74', 'warning_hover': '#cfc765',
         'danger': '#ff5c57', 'danger_hover': '#e64b46',
@@ -268,7 +342,7 @@ COLOR_THEMES = {
         'bg': '#100f12', 'surface': '#19181c', 'sidebar': '#141317',
         'sidebar_active': '#26242b', 'hover': '#211f26',
         'accent': '#f5c66b', 'accent_hover': '#dfae53',
-        'text': '#e6e6e6', 'sub': '#6f6d75',
+        'text': '#e6e6e6', 'sub': '#8d8b93',
         'success': '#7ad2af', 'success_hover': '#63bd97',
         'warning': '#e6a532', 'warning_hover': '#cd8f24',
         'danger': '#ed5c65', 'danger_hover': '#d24952',
@@ -279,7 +353,7 @@ COLOR_THEMES = {
         'bg': '#1c1e26', 'surface': '#252837', 'sidebar': '#191b24',
         'sidebar_active': '#2e3040', 'hover': '#31344a',
         'accent': '#ee6a8c', 'accent_hover': '#d55677',
-        'text': '#d5d6da', 'sub': '#5b5f6e',
+        'text': '#d5d6da', 'sub': '#9599a7',
         'success': '#59d3b2', 'success_hover': '#47bb9c',
         'warning': '#f0975c', 'warning_hover': '#d67f45',
         'danger': '#e95678', 'danger_hover': '#cf4463',
@@ -290,7 +364,7 @@ COLOR_THEMES = {
         'bg': '#181c22', 'surface': '#212730', 'sidebar': '#161a20',
         'sidebar_active': '#242c37', 'hover': '#2b3441',
         'accent': '#5cf2ff', 'accent_hover': '#3fd9e6',
-        'text': '#d8dee7', 'sub': '#5d6a78',
+        'text': '#d8dee7', 'sub': '#8996a4',
         'success': '#5cf2b4', 'success_hover': '#43d89a',
         'warning': '#ffd166', 'warning_hover': '#e6b94f',
         'danger': '#ff6b81', 'danger_hover': '#e64f66',
@@ -301,7 +375,7 @@ COLOR_THEMES = {
         'bg': '#141b16', 'surface': '#1c2620', 'sidebar': '#111814',
         'sidebar_active': '#22302a', 'hover': '#2a3a31',
         'accent': '#a3cfa4', 'accent_hover': '#8ab98b',
-        'text': '#dce8dd', 'sub': '#5f7263',
+        'text': '#dce8dd', 'sub': '#859989',
         'success': '#8fce91', 'success_hover': '#79b67c',
         'warning': '#d9b56a', 'warning_hover': '#c19e51',
         'danger': '#e08c8c', 'danger_hover': '#c97272',
@@ -312,7 +386,7 @@ COLOR_THEMES = {
         'bg': '#1a1424', 'surface': '#241c30', 'sidebar': '#16101e',
         'sidebar_active': '#3a2e52', 'hover': '#2e2442',
         'accent': '#a855f7', 'accent_hover': '#9333ea',
-        'text': '#e9dff5', 'sub': '#7e6f92',
+        'text': '#e9dff5', 'sub': '#a499b2',
         'success': '#4ade80', 'success_hover': '#22c55e',
         'warning': '#fbbf24', 'warning_hover': '#f59e0b',
         'danger': '#f87171', 'danger_hover': '#ef4444',
@@ -323,7 +397,7 @@ COLOR_THEMES = {
         'bg': '#1a0a2e', 'surface': '#2d1b4e', 'sidebar': '#150826',
         'sidebar_active': '#4c1d95', 'hover': '#3b2670',
         'accent': '#a855f7', 'accent_hover': '#9333ea',
-        'text': '#f3e8ff', 'sub': '#937db8',
+        'text': '#f3e8ff', 'sub': '#b09fcb',
         'success': '#c084fc', 'success_hover': '#a855f7',
         'warning': '#e879f9', 'warning_hover': '#d946ef',
         'danger': '#f472b6', 'danger_hover': '#ec4899',
@@ -334,7 +408,7 @@ COLOR_THEMES = {
         'bg': '#1a1012', 'surface': '#241618', 'sidebar': '#160d0f',
         'sidebar_active': '#3a1f23', 'hover': '#2e191d',
         'accent': '#ef4444', 'accent_hover': '#dc2626',
-        'text': '#f5e6e8', 'sub': '#927075',
+        'text': '#f5e6e8', 'sub': '#a5888c',
         'success': '#4ade80', 'success_hover': '#22c55e',
         'warning': '#fbbf24', 'warning_hover': '#f59e0b',
         'danger': '#f87171', 'danger_hover': '#ef4444',
@@ -345,7 +419,7 @@ COLOR_THEMES = {
         'bg': '#f5f0fa', 'surface': '#ffffff', 'sidebar': '#ebe3f2',
         'sidebar_active': '#d6c8e6', 'hover': '#e0d2ec',
         'accent': '#9333ea', 'accent_hover': '#7e22ce',
-        'text': '#2d1f3d', 'sub': '#7c6a8f',
+        'text': '#2d1f3d', 'sub': '#5e506c',
         'success': '#16a34a', 'success_hover': '#15803d',
         'warning': '#d97706', 'warning_hover': '#b45309',
         'danger': '#dc2626', 'danger_hover': '#b91c1c',
@@ -356,7 +430,7 @@ COLOR_THEMES = {
         'bg': '#e8e8e8', 'surface': '#f4f4f4', 'sidebar': '#dddddd',
         'sidebar_active': '#cccccc', 'hover': '#d4d4d4',
         'accent': '#444444', 'accent_hover': '#2f2f2f',
-        'text': '#323437', 'sub': '#7e8182',
+        'text': '#323437', 'sub': '#555758',
         'success': '#3f9b6e', 'success_hover': '#35855d',
         'warning': '#c9952f', 'warning_hover': '#b07f24',
         'danger': '#c94949', 'danger_hover': '#ad3c3c',
@@ -367,17 +441,146 @@ COLOR_THEMES = {
 
 # Legacy hardcoded hexes -> palette role (used to recolor existing widgets).
 LEGACY_HEX_ROLES = {
-    '#3498db': 'accent', '#2980b9': 'accent_hover',
+    '#3498db': 'accent', '#2980b9': 'accent_hover', '#21618c': 'accent_hover',
     '#27ae60': 'success', '#229954': 'success_hover', '#2ecc71': 'success',
+    '#16a085': 'success', '#138d75': 'success_hover', '#1e8449': 'success_hover',
     '#f39c12': 'warning', '#d68910': 'warning_hover',
     '#e74c3c': 'danger', '#c0392b': 'danger_hover',
-    '#8e44ad': 'purple', '#7d3c98': 'purple_hover',
-    '#95a5a6': 'sub', '#646669': 'sub',
+    '#8e44ad': 'purple', '#7d3c98': 'purple_hover', '#9b59b6': 'purple',
+    '#95a5a6': 'sub', '#646669': 'sub', '#7f8c8d': 'sub',
+    '#636e72': 'sidebar_active', '#57606f': 'hover',
     '#ecf0f1': 'text', '#d1d0c5': 'text', '#bdc3c7': 'text',
     '#1b2532': 'sidebar', '#1f2a3a': 'sidebar',
     '#2c3e50': 'sidebar_active', '#34495e': 'hover',
     '#2b2b2b': 'surface',
 }
+
+
+class _QueueRowList(ctk.CTkScrollableFrame):
+    """Themed stand-in for the queue's raw ``tk.Listbox``.
+
+    Speaks the small subset of the Listbox API that
+    ``_rebuild_queue_list`` and friends use (``size``/``insert``/
+    ``delete``/``get``/``itemconfig``/``curselection``), so the refresh
+    logic — in-place row updates instead of a full rebuild on every
+    progress tick — is unchanged. Rows are CTk labels, so they follow the
+    active palette like every other widget; the old tk.Listbox sat
+    entirely outside the theme walker and kept hardcoded dark rows after
+    switching to a Light theme.
+    """
+
+    def __init__(self, master, palette=None, **kwargs):
+        # Plain attributes first: CTkFrame.__init__ may re-configure itself
+        # through the override below, which touches them.
+        pal = dict(palette or {})
+        self._labels: list[str] = []
+        self._rows: list[Any] = []
+        self._overrides: dict[int, str] = {}  # per-row text_color (placeholder)
+        self._selected: int | None = None
+        self._row_fg = pal.get("text", "#ecf0f1")
+        self._sel_bg = pal.get("accent", "#3498db")
+        self._sel_fg = _on_color(
+            self._sel_bg, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24"))
+        super().__init__(
+            master,
+            fg_color=pal.get("sidebar_active", "#2c3e50"),
+            corner_radius=UITheme.RADIUS_MD,
+            **kwargs,
+        )
+        # Let the theme walker repaint the panel like any other widget.
+        setattr(self, "_theme_roles", {"fg_color": "sidebar_active"})
+
+    # --- Listbox-compatible API (the only surface ui.py uses) ------
+
+    def size(self) -> int:
+        return len(self._labels)
+
+    def get(self, index: int) -> str:
+        return self._labels[index] if 0 <= index < len(self._labels) else ""
+
+    def insert(self, index, text: str) -> None:
+        # Only append semantics are used (always called with tk.END).
+        i = len(self._labels)
+        self._labels.append(text)
+        row = ctk.CTkLabel(
+            self,
+            text=text,
+            font=UITheme.F(11),
+            anchor="w",
+            corner_radius=UITheme.RADIUS_SM,
+            fg_color="transparent",
+            text_color=self._row_fg,
+            cursor="hand2",
+        )
+        row.pack(fill="x", padx=6, pady=1)
+        row.bind("<Button-1>", lambda e, idx=i: self._select(idx))
+        self._rows.append(row)
+
+    def delete(self, first, last=None) -> None:
+        # Listbox semantics: the only call shape is delete(0, tk.END).
+        for row in self._rows:
+            row.destroy()
+        self._rows.clear()
+        self._labels.clear()
+        self._overrides.clear()
+        self._selected = None
+
+    def itemconfig(self, index, **kwargs) -> None:
+        if not isinstance(index, int) or not (0 <= index < len(self._rows)):
+            return
+        if "text" in kwargs:
+            self._labels[index] = str(kwargs["text"])
+            # Real content replaces any placeholder styling on the row.
+            self._overrides.pop(index, None)
+            self._rows[index].configure(text=self._labels[index])
+        if "foreground" in kwargs:
+            self._overrides[index] = str(kwargs["foreground"])
+        self._paint(index)
+
+    def curselection(self):
+        return () if self._selected is None else (self._selected,)
+
+    # --- theming ---------------------------------------------------
+
+    def configure(self, cnf=None, **kwargs):
+        """Accept CTk options plus the legacy Listbox theming keys
+        (bg/fg/selectbackground/selectforeground) the theme pass uses."""
+        data = dict(cnf or {})
+        data.update(kwargs)
+        for old, attr in (("fg", "_row_fg"),
+                          ("selectbackground", "_sel_bg"),
+                          ("selectforeground", "_sel_fg")):
+            if old in data:
+                setattr(self, attr, data.pop(old))
+        if "bg" in data:
+            data["fg_color"] = data.pop("bg")
+        if data:
+            super().configure(**data)
+        for i in range(len(self._rows)):
+            self._paint(i)
+
+    config = configure
+
+    def _select(self, index: int) -> None:
+        if not (0 <= index < len(self._labels)):
+            return
+        prev, self._selected = self._selected, index  # browse: click selects
+        if prev is not None and prev != index:
+            self._paint(prev)
+        self._paint(index)
+
+    def _paint(self, i: int) -> None:
+        if not (0 <= i < len(self._rows)):
+            return
+        if i == self._selected:
+            self._rows[i].configure(
+                fg_color=self._sel_bg, text_color=self._sel_fg)
+        elif i in self._overrides:
+            self._rows[i].configure(
+                fg_color="transparent", text_color=self._overrides[i])
+        else:
+            self._rows[i].configure(
+                fg_color="transparent", text_color=self._row_fg)
 
 
 class UniversalAudioStudio(ctk.CTk):
@@ -770,8 +973,19 @@ class UniversalAudioStudio(ctk.CTk):
         )
         self.title_lbl.pack(side="left")
 
+        # Right side of the header: live status slot. Download/queue state
+        # stays readable from every page, not just the Downloader tab.
+        self.header_status_lbl = ctk.CTkLabel(
+            self._header_frame,
+            text="",
+            font=UITheme.F(11),
+            anchor="e",
+            justify="right",
+        )
+        self.header_status_lbl.pack(side="right", padx=(12, 0))
+
         # Central content area (pages are swapped inside here)
-        self.content_frame = ctk.CTkFrame(self.main_container, fg_color=UITheme.SURFACE_BG, corner_radius=20)
+        self.content_frame = ctk.CTkFrame(self.main_container, fg_color=UITheme.SURFACE_BG, corner_radius=UITheme.RADIUS_CARD)
         self.content_frame.pack(
             pady=10,
             padx=14,
@@ -942,7 +1156,7 @@ class UniversalAudioStudio(ctk.CTk):
 
     # --- TAB 1 DESIGN ---
     def build_downloader_view(self):
-        ctk.CTkLabel(self.tab_downloader, text="Media Downloader", font=("Segoe UI", 18, "bold")).pack(pady=(10,4))
+        # Page title lives in the header only (title_lbl) — no in-page H1.
 
         self.url_entry = ctk.CTkEntry(
             self.tab_downloader,
@@ -950,100 +1164,94 @@ class UniversalAudioStudio(ctk.CTk):
             height=36,
             placeholder_text="Paste link or search song name"
         )
-        self.url_entry.pack(pady=(4,8), padx=20, fill="x")
+        self.url_entry.pack(pady=(14,8), padx=UITheme.PAD_X, fill="x")
 
         # Inline clear button: overlays the field's right edge and only shows
         # while there is text to clear (Escape does the same from the keyboard).
         self.btn_clear_url = ctk.CTkButton(
             self.url_entry, text="✕", width=24, height=24,
-            fg_color="transparent", hover_color="#34495e",
-            text_color="#95a5a6", corner_radius=12, cursor="hand2",
+            fg_color="transparent", corner_radius=12, cursor="hand2",
             command=self._on_clear_url_clicked,
         )
+        self._style_button(self.btn_clear_url, "ghost")
+        try:
+            # The ✕ should read as muted (sub), not full-strength text.
+            sub = (getattr(self, "_palette", {}) or {}).get("sub", "#95a5a6")
+            self.btn_clear_url.configure(text_color=sub)
+            setattr(self.btn_clear_url, "_theme_roles",
+                    {**self._BTN_ROLES["ghost"], "text_color": "sub"})
+        except Exception:
+            pass
         self._url_clear_btn_visible = False
 
-        # Button for MP3/Spotify
+        # Row 1: the two download actions side by side (they used to be two
+        # more stacked full-width rows). MP3 is the screen's one accent.
+        action_row = ctk.CTkFrame(self.tab_downloader, fg_color="transparent")
+        action_row.pack(pady=(2, 6))
+
         self.btn_download_mp3 = ctk.CTkButton(
-            self.tab_downloader,
+            action_row,
             text="Download Audio (MP3)",
-            width=240, height=36,
-            fg_color="#3498db",
-            hover_color="#2980b9",
+            width=200, height=36,
             cursor="hand2",
             command=lambda: self._start_worker(self.download_mp3)
         )
-        self.btn_download_mp3.pack(pady=(2,6))
+        self.btn_download_mp3.pack(side="left", padx=6)
+        self._style_button(self.btn_download_mp3, "primary")
 
         self.btn_download_mp4 = ctk.CTkButton(
-            self.tab_downloader,
+            action_row,
             text="Download Video (MP4)",
-            width=240, height=36,
-            fg_color="#27ae60",
-            hover_color="#229954",
+            width=200, height=36,
             cursor="hand2",
             command=lambda: self._start_worker(self.download_mp4)
         )
-        self.btn_download_mp4.pack(pady=(0,6))
+        self.btn_download_mp4.pack(side="left", padx=6)
+        self._style_button(self.btn_download_mp4, "secondary")
 
-        # Cancellation: enabled only while a download is in flight (#1).
-        self.btn_cancel_download = ctk.CTkButton(
-            self.tab_downloader,
-            text="\u23f9 Cancel Download",
-            width=240, height=32,
-            fg_color="#e74c3c",
-            hover_color="#c0392b",
-            cursor="hand2",
-            command=self._cancel_active_download,
-            state="disabled",
-        )
-        self.btn_cancel_download.pack(pady=(0,6))
-
+        # Row 2: previews in a single row (was a 2x2 grid); stops are danger.
         preview_frame = ctk.CTkFrame(self.tab_downloader, fg_color="transparent")
-        preview_frame.pack(pady=(2,6))
+        preview_frame.pack(pady=(0, 8))
 
         self.btn_preview_audio = ctk.CTkButton(
             preview_frame,
             text="▶ Preview Audio",
-            width=115,
-            fg_color="#f39c12",
-            hover_color="#d68910",
+            width=118, height=28,
             cursor="hand2",
             command=lambda: self._start_worker(self.preview_audio)
         )
-        self.btn_preview_audio.grid(row=0, column=0, padx=6)
+        self.btn_preview_audio.grid(row=0, column=0, padx=4)
+        self._style_button(self.btn_preview_audio, "secondary")
         self.btn_stop_audio = ctk.CTkButton(
             preview_frame,
             text="⏹ Stop Audio",
-            width=115,
-            fg_color="#e74c3c",
-            hover_color="#c0392b",
+            width=118, height=28,
             cursor="hand2",
             command=self.stop_preview_audio,
             state="disabled"
         )
-        self.btn_stop_audio.grid(row=0, column=1, padx=6)
+        self.btn_stop_audio.grid(row=0, column=1, padx=4)
+        self._style_button(self.btn_stop_audio, "danger")
 
         self.btn_preview_video = ctk.CTkButton(
             preview_frame,
             text="▶ Preview Video",
-            width=115,
-            fg_color="#8e44ad",
-            hover_color="#7d3c98",
+            width=118, height=28,
             cursor="hand2",
             command=lambda: self._start_worker(self.preview_video)
         )
-        self.btn_preview_video.grid(row=1, column=0, padx=6, pady=(4,0))
+        self.btn_preview_video.grid(row=0, column=2, padx=4)
+        self._style_button(self.btn_preview_video, "secondary")
         self.btn_stop_video = ctk.CTkButton(
             preview_frame,
             text="⏹ Stop Video",
-            width=115,
-            fg_color="#e74c3c",
-            hover_color="#c0392b",
+            width=118, height=28,
             cursor="hand2",
             command=self.stop_preview_video,
             state="disabled"
         )
-        self.btn_stop_video.grid(row=1, column=1, padx=6, pady=(4,0))
+        self.btn_stop_video.grid(row=0, column=3, padx=4)
+        self._style_button(self.btn_stop_video, "danger")
 
         self.url_entry.bind("<Enter>", lambda e: self._set_hover_detail("Paste link or search song. Spotify links are auto-converted.", "#bdc3c7"))
         self.url_entry.bind("<Leave>", lambda e: self._restore_hover_detail())
@@ -1068,76 +1276,119 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_preview_video.bind("<Enter>", lambda e: self._set_hover_detail("Preview video in the stream player.", "#ecf0f1"))
         self.btn_preview_video.bind("<Leave>", lambda e: self._restore_hover_detail())
 
-        # Embedded preview panel (hidden until used)
-        self.preview_panel = tk.Frame(self.tab_downloader, bg='black', width=280, height=170)
-        self.preview_panel.pack(pady=(4,8))
-        self.preview_panel.pack_forget()
-
-        # Save-location + audio-quality controls (#1, #2).
-        self.save_folder_lbl = ctk.CTkLabel(
+        # Status pill: rounded chip + colored dot instead of bare text.
+        pal = getattr(self, "_palette", {}) or {}
+        pill_bg = pal.get("sidebar_active", UITheme.SIDEBAR_ACTIVE)
+        self._status_pill = ctk.CTkFrame(
             self.tab_downloader,
-            text="",
-            font=("Segoe UI", 11),
-            text_color="#95a5a6",
-            wraplength=340,
-            justify="center",
+            corner_radius=UITheme.RADIUS_MD,
+            fg_color=pill_bg,
         )
-        self.save_folder_lbl.pack(padx=20, pady=(2, 1))
+        self._status_pill.pack(pady=(0, 6))
+        setattr(self._status_pill, "_theme_roles", {"fg_color": "sidebar_active"})
+        self._status_dot = ctk.CTkLabel(
+            self._status_pill, text="●", font=UITheme.F(10),
+            text_color=pal.get("sub", UITheme.COLOR_GRAY),
+        )
+        self._status_dot.pack(side="left", padx=(12, 6))
+        setattr(self._status_dot, "_theme_roles", {"text_color": "sub"})
+        self.dl_status = ctk.CTkLabel(
+            self._status_pill, text="System Ready", font=UITheme.F(12),
+            text_color=_on_color(
+                pill_bg, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24")),
+        )
+        self.dl_status.pack(side="left", padx=(0, 12))
+        setattr(self.dl_status, "_theme_roles", {"text_color": "text"})
+        try:
+            self.header_status_lbl.configure(
+                text="System Ready",
+                text_color=self.dl_status.cget("text_color"),
+            )
+        except Exception:
+            pass
+
+        # Progress row: bar + cancel side by side. Cancel only enables while
+        # a download is in flight, so it no longer deserves its own row.
+        progress_row = ctk.CTkFrame(self.tab_downloader, fg_color="transparent")
+        progress_row.pack(fill="x", padx=UITheme.PAD_X, pady=(0, 4))
+        self.progress_bar = ctk.CTkProgressBar(progress_row, width=200)
+        self.progress_bar.set(0)
+        self.progress_bar.pack(side="left", fill="x", expand=True)
+        self.btn_cancel_download = ctk.CTkButton(
+            progress_row,
+            text="⏹ Cancel Download",
+            width=150, height=28,
+            cursor="hand2",
+            command=self._cancel_active_download,
+            state="disabled",
+        )
+        self.btn_cancel_download.pack(side="left", padx=(10, 0))
+        self._style_button(self.btn_cancel_download, "danger")
+
+        self.dl_detail = ctk.CTkLabel(self.tab_downloader, text="", font=UITheme.F(11), text_color="#95a5a6")
+        self.dl_detail.pack(pady=(0, 2))
+
+        # Speed + ETA label below progress bar
+        self.dl_speed_lbl = ctk.CTkLabel(self.tab_downloader, text="", font=UITheme.F(11), text_color="#7f8c8d")
+        self.dl_speed_lbl.pack(pady=(0, 4))
+
+        # Row: save folder + audio quality side by side (was two stacked rows).
+        settings_row = ctk.CTkFrame(self.tab_downloader, fg_color="transparent")
+        settings_row.pack(pady=(0, 2))
         self.btn_choose_folder = ctk.CTkButton(
-            self.tab_downloader,
+            settings_row,
             text="📁 Change Save Folder",
-            width=200, height=30,
-            fg_color="#16a085",
-            hover_color="#138d75",
+            width=175, height=30,
             cursor="hand2",
             command=self._choose_save_folder,
         )
-        self.btn_choose_folder.pack(pady=(0, 4))
-
-        fmt_row = ctk.CTkFrame(self.tab_downloader, fg_color="transparent")
-        fmt_row.pack(pady=(0, 2))
-        ctk.CTkLabel(fmt_row, text="Audio quality:", font=("Segoe UI", 12)).pack(side="left", padx=(0, 8))
+        self.btn_choose_folder.pack(side="left", padx=(0, 8))
+        self._style_button(self.btn_choose_folder, "secondary")
+        ctk.CTkLabel(settings_row, text="Audio quality:", font=UITheme.F(12)).pack(side="left", padx=(0, 8))
         self.fmt_option = ctk.CTkOptionMenu(
-            fmt_row,
+            settings_row,
             width=190,
-            values=[p['label'] for p in downloader.AUDIO_FORMATS.values()],
+            values=[p["label"] for p in downloader.AUDIO_FORMATS.values()],
             command=self._on_audio_format_change,
         )
         self.fmt_option.set(
             downloader.AUDIO_FORMATS.get(
-                downloader.get_audio_format(), {'label': 'MP3 (VBR High)'}
-            )['label']
+                downloader.get_audio_format(), {"label": "MP3 (VBR High)"}
+            )["label"]
         )
         self.fmt_option.pack(side="left")
+        self._style_option_menu(self.fmt_option)
+
+        self.save_folder_lbl = ctk.CTkLabel(
+            self.tab_downloader,
+            text="",
+            font=UITheme.F(11),
+            text_color="#95a5a6",
+            wraplength=340,
+            justify="center",
+        )
+        self.save_folder_lbl.pack(padx=UITheme.PAD_X, pady=(2, 4))
 
         # Outdated yt-dlp notice (hidden until a check finds one).
         self._ytdlp_notice_lbl = ctk.CTkLabel(
             self.tab_downloader,
             text="",
-            font=("Segoe UI", 11, "bold"),
+            font=UITheme.F(11, "bold"),
             text_color="#f39c12",
             wraplength=340,
             justify="center",
         )
-        self._ytdlp_notice_lbl.pack(padx=20, pady=(0, 2))
+        self._ytdlp_notice_lbl.pack(padx=UITheme.PAD_X, pady=(0, 2))
         self._update_save_folder_label()
 
         # place downloader frame in content area
         self.tab_downloader.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-        self.dl_status = ctk.CTkLabel(self.tab_downloader, text="System Ready", font=("Segoe UI", 13))
-        self.dl_status.pack(pady=(4,1))
-
-        self.dl_detail = ctk.CTkLabel(self.tab_downloader, text="", font=("Segoe UI", 11), text_color="#95a5a6")
-        self.dl_detail.pack(pady=(0,2))
-
-        self.progress_bar = ctk.CTkProgressBar(self.tab_downloader, width=300)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(pady=(1, 8), padx=20, fill="x")
-
-        # Speed + ETA label below progress bar
-        self.dl_speed_lbl = ctk.CTkLabel(self.tab_downloader, text="", font=("Segoe UI", 11), text_color="#7f8c8d")
-        self.dl_speed_lbl.pack(pady=(0, 2))
+        # Embedded preview panel (hidden until used; re-packs at the end
+        # when a preview starts, so build order here does not matter).
+        self.preview_panel = tk.Frame(self.tab_downloader, bg="black", width=280, height=170)
+        self.preview_panel.pack(pady=(4, 8))
+        self.preview_panel.pack_forget()
 
         # --- Queue + Tag Editor controls ---
         controls_row = ctk.CTkFrame(self.tab_downloader, fg_color="transparent")
@@ -1145,15 +1396,15 @@ class UniversalAudioStudio(ctk.CTk):
 
         self.btn_add_to_queue = ctk.CTkButton(
             controls_row, text="➕ Add to Queue", width=130, height=28,
-            fg_color="#27ae60", hover_color="#229954",
             command=self._add_current_to_queue)
         self.btn_add_to_queue.pack(side="left", padx=(0, 8))
+        self._style_button(self.btn_add_to_queue, "secondary")
 
         self.btn_edit_tags = ctk.CTkButton(
             controls_row, text="Edit Tags", width=100, height=28,
-            fg_color="#9b59b6", hover_color="#8e44ad",
             command=self._open_tag_editor, state="disabled")
         self.btn_edit_tags.pack(side="left", padx=(8, 0))
+        self._style_button(self.btn_edit_tags, "secondary")
 
         self._last_downloaded_file = None
         self._last_dl_was_video = False
@@ -1319,23 +1570,14 @@ class UniversalAudioStudio(ctk.CTk):
             pass
 
     def build_queue_view(self):
-        ctk.CTkLabel(self.tab_queue, text="Download Queue", font=("Segoe UI", 18, "bold")).pack(pady=(20, 10))
+        # Page title lives in the header only — no in-page H1.
 
-        # Colors follow the active palette so Light mode doesn't keep
-        # hardcoded dark rows (tk.Listbox isn't a CTk widget, so the theme
-        # walker in apply_color_theme never touches it — it's recolored
-        # explicitly there instead).
+        # Themed row list (CTk labels) replacing the raw tk.Listbox, so the
+        # queue follows the active palette like every other widget.
         pal = getattr(self, "_palette", {}) or {}
-        self.queue_listbox = tk.Listbox(
-            self.tab_queue, height=12, font=("Segoe UI", 11),
-            bg=pal.get("sidebar_active", "#2c3e50"),
-            fg=pal.get("text", "#ecf0f1"),
-            selectbackground=pal.get("accent", "#3498db"),
-            selectforeground=pal.get("text", "#ecf0f1"),
-            selectmode="browse", activestyle="none",
-            highlightthickness=0, bd=0, relief="flat",
-        )
-        self.queue_listbox.pack(pady=(0, 12), padx=20, fill="both", expand=True)
+        self.queue_rows = _QueueRowList(self.tab_queue, palette=pal)
+        self.queue_rows.pack(pady=(14, 12), padx=UITheme.PAD_X,
+                             fill="both", expand=True)
 
         queue_btn_row = ctk.CTkFrame(self.tab_queue, fg_color="transparent")
         queue_btn_row.pack(pady=(0, 6))
@@ -1344,24 +1586,25 @@ class UniversalAudioStudio(ctk.CTk):
             queue_btn_row, text="▶ Start", width=90, height=30,
             command=self._queue_start)
         self.btn_queue_start.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_start, "primary")
 
         self.btn_queue_remove = ctk.CTkButton(
             queue_btn_row, text="🗑 Remove", width=90, height=30,
-            fg_color="#95a5a6", hover_color="#7f8c8d",
             command=self._queue_remove_selected)
         self.btn_queue_remove.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_remove, "danger")
 
         self.btn_queue_retry = ctk.CTkButton(
             queue_btn_row, text="↻ Retry", width=90, height=30,
-            fg_color="#2980b9", hover_color="#21618c",
             command=self._queue_retry_failed)
         self.btn_queue_retry.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_retry, "secondary")
 
         self.btn_queue_cancel = ctk.CTkButton(
             queue_btn_row, text="✖ Cancel", width=90, height=30,
-            fg_color="#e74c3c", hover_color="#c0392b",
             command=self._queue_cancel_all)
         self.btn_queue_cancel.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_cancel, "danger")
 
         # Second row: six buttons in one row (~600px) clipped off the right
         # edge at the 800px minimum window width, especially with the
@@ -1371,17 +1614,17 @@ class UniversalAudioStudio(ctk.CTk):
 
         self.btn_queue_clear = ctk.CTkButton(
             queue_btn_row2, text="🧹 Clear", width=90, height=30,
-            fg_color="#636e72", hover_color="#57606f",
             command=self._queue_clear)
         self.btn_queue_clear.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_clear, "danger")
 
         self.btn_queue_clear_done = ctk.CTkButton(
             queue_btn_row2, text="✓ Clear Done", width=100, height=30,
-            fg_color="#27ae60", hover_color="#229954",
             command=self._queue_clear_completed)
         self.btn_queue_clear_done.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_clear_done, "secondary")
 
-        self.queue_status = ctk.CTkLabel(self.tab_queue, text="Idle", font=("Segoe UI", 11),
+        self.queue_status = ctk.CTkLabel(self.tab_queue, text="Idle", font=UITheme.F(11),
                                          text_color="#95a5a6")
         self.queue_status.pack(pady=(6, 0))
 
@@ -1400,7 +1643,7 @@ class UniversalAudioStudio(ctk.CTk):
         return f"{icon} [{item.status.upper():>9}] {item.url[:50]}"
 
     def _rebuild_queue_list(self):
-        lb = self.queue_listbox
+        lb = self.queue_rows
         if not self._queue_manager:
             lb.delete(0, tk.END)
             self._queue_show_empty_placeholder()
@@ -1428,13 +1671,13 @@ class UniversalAudioStudio(ctk.CTk):
         self._update_queue_status()
 
     def _queue_show_empty_placeholder(self):
-        """Fill the blank listbox with a hint so an empty queue reads as
+        """Fill the blank row list with a hint so an empty queue reads as
         'nothing here yet' instead of a dead panel."""
         pal = getattr(self, "_palette", {}) or {}
-        self.queue_listbox.insert(
+        self.queue_rows.insert(
             tk.END, "  Queue is empty — paste links on the Downloader page")
         try:
-            self.queue_listbox.itemconfig(0, foreground=pal.get("sub", "#95a5a6"))
+            self.queue_rows.itemconfig(0, foreground=pal.get("sub", "#95a5a6"))
         except Exception:
             pass
 
@@ -1479,9 +1722,9 @@ class UniversalAudioStudio(ctk.CTk):
         if not self._queue_manager:
             return
         if not getattr(self._queue_manager, "items", None):
-            # Only the empty-state placeholder row is in the listbox.
+            # Only the empty-state placeholder row is in the list.
             return
-        sel = self.queue_listbox.curselection()
+        sel = self.queue_rows.curselection()
         if not sel:
             self.show_toast("Select an item to remove", "warning")
             return
@@ -1503,20 +1746,20 @@ class UniversalAudioStudio(ctk.CTk):
     def build_history_view(self):
         """Build the Download History tab: scrollable list of past downloads
         with re-download buttons and a clear-history control."""
-        ctk.CTkLabel(self.tab_history, text="Download History", font=("Segoe UI", 18, "bold")).pack(pady=(10, 6))
+        # Page title lives in the header only — no in-page H1.
 
         # Top controls: Clear History button + count label
         ctrl_row = ctk.CTkFrame(self.tab_history, fg_color="transparent")
-        ctrl_row.pack(fill="x", padx=20, pady=(0, 6))
+        ctrl_row.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 6))
 
         self.btn_clear_history = ctk.CTkButton(
             ctrl_row, text="🧹 Clear History", width=140, height=30,
-            fg_color="#e74c3c", hover_color="#c0392b",
             command=self._clear_history,
         )
         self.btn_clear_history.pack(side="left")
+        self._style_button(self.btn_clear_history, "danger")
 
-        self.history_count_lbl = ctk.CTkLabel(ctrl_row, text="0 entries", font=("Segoe UI", 12), text_color="#95a5a6")
+        self.history_count_lbl = ctk.CTkLabel(ctrl_row, text="0 entries", font=UITheme.F(12), text_color="#95a5a6")
         self.history_count_lbl.pack(side="left", padx=(12, 0))
 
         # Search bar
@@ -1535,14 +1778,14 @@ class UniversalAudioStudio(ctk.CTk):
         self._history_sort_reverse = True
         sort_row = ctk.CTkFrame(self.tab_history, fg_color="transparent")
         sort_row.pack(fill="x", padx=20, pady=(0, 4))
-        ctk.CTkLabel(sort_row, text="Sort by:", font=("Segoe UI", 11), text_color="#95a5a6").pack(side="left")
+        ctk.CTkLabel(sort_row, text="Sort by:", font=UITheme.F(11), text_color="#95a5a6").pack(side="left")
         for lbl, key in [("Date", "date"), ("Title", "title"), ("Status", "status")]:
             btn = ctk.CTkButton(
                 sort_row, text=lbl, width=60, height=24,
-                fg_color="transparent", hover_color="#34495e",
-                text_color="#bdc3c7", font=("Segoe UI", 10),
+                font=UITheme.F(10),
                 command=lambda k=key: self._set_history_sort(k),
             )
+            self._style_button(btn, "ghost")
             btn.pack(side="left", padx=2)
 
         # Scrollable list of history entries
@@ -1624,7 +1867,7 @@ class UniversalAudioStudio(ctk.CTk):
             ctk.CTkLabel(
                 self._history_entries_frame,
                 text=msg,
-                font=("Segoe UI", 12), text_color="#95a5a6",
+                font=UITheme.F(12), text_color="#95a5a6",
             ).pack(pady=30)
             return
 
@@ -1667,14 +1910,14 @@ class UniversalAudioStudio(ctk.CTk):
         left = ctk.CTkFrame(row, fg_color="transparent")
         left.pack(side="left", fill="both", expand=True)
 
-        title_lbl = ctk.CTkLabel(left, text=title, font=("Segoe UI", 12, "bold"),
+        title_lbl = ctk.CTkLabel(left, text=title, font=UITheme.F(12, "bold"),
                                  anchor="w", wraplength=380, justify="left")
         title_lbl.pack(anchor="w")
 
         meta_parts = [f"{'🎬' if is_video else '🎵'} {date_str}"]
         meta_parts.append(f"File: {'✓ exists' if file_exists else '✗ missing'}")
         meta_text = "  |  ".join(meta_parts)
-        meta_lbl = ctk.CTkLabel(left, text=meta_text, font=("Segoe UI", 10),
+        meta_lbl = ctk.CTkLabel(left, text=meta_text, font=UITheme.F(10),
                                 text_color="#7f8c8d", anchor="w")
         meta_lbl.pack(anchor="w")
 
@@ -1682,16 +1925,16 @@ class UniversalAudioStudio(ctk.CTk):
         right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="right")
 
-        status_lbl = ctk.CTkLabel(right, text=status.upper(), font=("Segoe UI", 10, "bold"),
+        status_lbl = ctk.CTkLabel(right, text=status.upper(), font=UITheme.F(10, "bold"),
                                   text_color=status_color, width=70)
         status_lbl.pack(side="left", padx=(0, 6))
 
         # Re-download button
         btn_redl = ctk.CTkButton(
             right, text="↻", width=34, height=28,
-            fg_color="#27ae60", hover_color="#1e8449",
             command=lambda u=url, v=is_video: self._redownload(u, v),
         )
+        self._style_button(btn_redl, "primary")
         btn_redl.pack(side="left", padx=2)
         # Glyph-only buttons get hover tooltips (reusing the sidebar popup,
         # which already avoids the transient-black-flicker traps).
@@ -1702,9 +1945,9 @@ class UniversalAudioStudio(ctk.CTk):
         if file_exists:
             btn_open = ctk.CTkButton(
                 right, text="📂", width=34, height=28,
-                fg_color="#2980b9", hover_color="#21618c",
                 command=lambda p=filepath: self._open_file(p),
             )
+            self._style_button(btn_open, "secondary")
             btn_open.pack(side="left", padx=2)
             btn_open.bind("<Enter>", lambda e, b=btn_open: self._schedule_sb_tooltip(b, "Open file", only_when_collapsed=False))
             btn_open.bind("<Leave>", lambda e: self._hide_sb_tooltip())
@@ -1787,17 +2030,16 @@ class UniversalAudioStudio(ctk.CTk):
         dismissed early with a click, and are capped at four so a burst of
         messages can never cover the window.
 
-        toast_type: 'info' (blue), 'success' (green), 'warning' (orange), 'error' (red)
+        toast_type: 'info' (accent), 'success', 'warning', 'error' (danger)
         duration: milliseconds before auto-dismiss
         """
-        colors = {
-            "info": ("#2980b9", "#21618c"),
-            "success": ("#27ae60", "#1e8449"),
-            "warning": ("#f39c12", "#d68910"),
-            "error": ("#e74c3c", "#c0392b"),
-        }
-        fg_color, hover_color = colors.get(toast_type, colors["info"])
-        del hover_color  # kept in the tuple for symmetry; frames have no hover
+        # Toast colors come from the active palette (same semantic roles as
+        # the buttons), not fixed hexes that ignore theme switches.
+        pal = getattr(self, "_palette", {}) or {}
+        role = {"info": "accent", "success": "success",
+                "warning": "warning", "error": "danger"}.get(toast_type, "accent")
+        fg_color = pal.get(role, "#2980b9")
+        on_color = _on_color(fg_color, "#ffffff", pal.get("bg", "#1e1e24"))
 
         try:
             # Drop entries whose widget was destroyed, then cap the stack
@@ -1809,12 +2051,14 @@ class UniversalAudioStudio(ctk.CTk):
                 except Exception:
                     pass
 
-            toast = ctk.CTkFrame(self, fg_color=fg_color, corner_radius=10)
+            toast = ctk.CTkFrame(self, fg_color=fg_color,
+                                 corner_radius=UITheme.RADIUS_MD)
+            setattr(toast, "_theme_roles", {"fg_color": role})
 
             icon = {"info": "ℹ", "success": "✓", "warning": "⚠", "error": "✗"}.get(toast_type, "ℹ")
             lbl = ctk.CTkLabel(
                 toast, text=f" {icon} {message}",
-                font=("Segoe UI", 12), text_color="white",
+                font=UITheme.F(12), text_color=on_color,
                 wraplength=340, justify="right",
             )
             lbl.pack(padx=16, pady=10)
@@ -2606,7 +2850,32 @@ class UniversalAudioStudio(ctk.CTk):
 
     def update_dl_status(self, text, color):
         themed = self._map_color(color)
-        self.after(0, lambda: self.dl_status.configure(text=text, text_color=themed))
+        # Remember the palette role on both labels so a theme switch while
+        # a status is showing repaints them instead of freezing the old hue.
+        role = LEGACY_HEX_ROLES.get(str(color).lower())
+
+        def _apply():
+            targets = (getattr(self, "dl_status", None),
+                       getattr(self, "header_status_lbl", None))
+            for lbl in targets:
+                if lbl is None:
+                    continue
+                try:
+                    lbl.configure(text=text, text_color=themed)
+                    if role:
+                        setattr(lbl, "_theme_roles", {"text_color": role})
+                except Exception:
+                    pass
+            # The pill's dot echoes the status color.
+            try:
+                self._status_dot.configure(text_color=themed)
+                if role:
+                    setattr(self._status_dot, "_theme_roles",
+                            {"text_color": role})
+            except Exception:
+                pass
+
+        self.after(0, _apply)
 
     def update_dl_detail(self, text, color):
         themed = self._map_color(color)
@@ -2742,11 +3011,15 @@ class UniversalAudioStudio(ctk.CTk):
     def build_studio_view(self):
         self.file_frame = ctk.CTkFrame(self.tab_studio, fg_color="transparent")
         self.file_frame.pack(pady=(12,4), padx=20, fill="x")
-        self.file_lbl = ctk.CTkLabel(self.file_frame, text="Load a music file...", font=("Segoe UI", 12, "italic"), text_color="#95a5a6")
+        self.file_lbl = ctk.CTkLabel(self.file_frame, text="Load a music file...", font=UITheme.F(12, "italic"), text_color="#95a5a6")
         self.file_lbl.pack(side="left", padx=10, pady=10)
-        ctk.CTkButton(self.file_frame, text="Browse Audio", width=100, command=self.load_studio_file).pack(side="right", padx=10, pady=10)
+        self.btn_browse_studio = ctk.CTkButton(
+            self.file_frame, text="Browse Audio", width=100,
+            command=self.load_studio_file)
+        self.btn_browse_studio.pack(side="right", padx=10, pady=10)
+        self._style_button(self.btn_browse_studio, "secondary")
 
-        self.sp_lbl = ctk.CTkLabel(self.tab_studio, text="Speed: 0.85x", font=("Segoe UI", 14, "bold"))
+        self.sp_lbl = ctk.CTkLabel(self.tab_studio, text="Speed: 0.85x", font=UITheme.F(14, "bold"))
         self.sp_lbl.pack(anchor="w", padx=20, pady=(6,0))
         self.sp_sld = ctk.CTkSlider(self.tab_studio, from_=0.5, to=1.5, command=lambda v: self.sp_lbl.configure(text=f"Speed: {float(v):.2f}x"))  # type: ignore[arg-type]
 
@@ -2754,7 +3027,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.sp_sld.set(0.85)
         self.sp_sld.pack(fill="x", padx=20, pady=(4,10))
 
-        self.rv_lbl = ctk.CTkLabel(self.tab_studio, text="Reverb Depth: 40%", font=("Segoe UI", 14, "bold"))
+        self.rv_lbl = ctk.CTkLabel(self.tab_studio, text="Reverb Depth: 40%", font=UITheme.F(14, "bold"))
         self.rv_lbl.pack(anchor="w", padx=20, pady=(4,0))
         self.rv_sld = ctk.CTkSlider(self.tab_studio, from_=0.0, to=1.0, command=lambda v: self.rv_lbl.configure(text=f"Reverb Depth: {int(float(v)*100)}%"))  # type: ignore[arg-type]
 
@@ -2764,13 +3037,16 @@ class UniversalAudioStudio(ctk.CTk):
 
         self.ctrl_frame = ctk.CTkFrame(self.tab_studio, fg_color="transparent")
         self.ctrl_frame.pack(pady=(6,10))
-        self.btn_play = ctk.CTkButton(self.ctrl_frame, text="▶ Play", fg_color="#2ecc71", hover_color="#27ae60", width=115, command=self.play_preview)
+        self.btn_play = ctk.CTkButton(self.ctrl_frame, text="▶ Play", width=115, command=self.play_preview)
         self.btn_play.grid(row=0, column=0, padx=6)
-        self.btn_stop = ctk.CTkButton(self.ctrl_frame, text="⏹ Stop", fg_color="#e74c3c", hover_color="#c0392b", width=115, command=self.stop_preview, state="disabled")
+        self._style_button(self.btn_play, "primary")
+        self.btn_stop = ctk.CTkButton(self.ctrl_frame, text="⏹ Stop", width=115, command=self.stop_preview, state="disabled")
         self.btn_stop.grid(row=0, column=1, padx=6)
+        self._style_button(self.btn_stop, "danger")
 
-        self.btn_export = ctk.CTkButton(self.tab_studio, text="💾 Export Remix", font=("Segoe UI", 12, "bold"), width=280, height=40, command=self.export_studio_track)
+        self.btn_export = ctk.CTkButton(self.tab_studio, text="💾 Export Remix", font=UITheme.F(12, "bold"), width=280, height=40, command=self.export_studio_track)
         self.btn_export.pack(pady=(4,10))
+        self._style_button(self.btn_export, "primary")
 
         self.studio_progress_bar = ctk.CTkProgressBar(self.tab_studio, width=300)
         self.studio_progress_bar.set(0)
@@ -2784,133 +3060,152 @@ class UniversalAudioStudio(ctk.CTk):
             self.file_lbl.configure(text=os.path.basename(sel), text_color="#2ecc71")
 
     def build_customization_view(self):
-        ctk.CTkLabel(self.tab_customization, text="Appearance Settings", font=("Segoe UI", 18, "bold")).pack(pady=(18,12))
+        # Page title lives in the header only — no in-page H1.
+        # One control owns theme mode now: every palette carries its own
+        # Light/Dark 'mode' and apply_color_theme syncs CTk from it, so the
+        # separate "Theme Mode" dropdown was redundant and is gone.
 
-        ctk.CTkLabel(self.tab_customization, text="Theme Mode:", font=("Segoe UI", 14)).pack(anchor="w", padx=20, pady=(10, 0))
-        self.mode_option = ctk.CTkOptionMenu(
-            self.tab_customization,
-            values=["Dark", "Light", "System"],
-            command=self.change_appearance_mode,
-            width=220
-        )
-        self.mode_option.set(self._prefs.get("theme_mode", "Dark") or "Dark")
-        self.mode_option.pack(padx=20, pady=(0, 12))
-
-        ctk.CTkLabel(self.tab_customization, text="Color Theme (Monkeytype-style):", font=("Segoe UI", 14)).pack(anchor="w", padx=20, pady=(10, 0))
+        theme_card = self._settings_card(self.tab_customization, "Theme")
+        theme_card.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 8))
+        ctk.CTkLabel(
+            theme_card, text="Color theme (Monkeytype-style):",
+            font=UITheme.F(12), anchor="w",
+        ).pack(fill="x", padx=16, pady=(0, 4))
         self.theme_menu = ctk.CTkOptionMenu(
-            self.tab_customization,
+            theme_card,
             values=list(COLOR_THEMES.keys()),
             command=self.apply_color_theme,
             width=220
         )
         self.theme_menu.set(self._color_theme_name)
-        self.theme_menu.pack(padx=20, pady=(0, 8))
+        self.theme_menu.pack(anchor="w", padx=16, pady=(0, 6))
+        self._style_option_menu(self.theme_menu)
+        ctk.CTkLabel(
+            theme_card,
+            text="Light/Dark follows the palette you pick here.",
+            font=UITheme.F(10), anchor="w", text_color="#95a5a6",
+        ).pack(fill="x", padx=16, pady=(0, 12))
 
         # Theme selection lives in the dropdown above only (the duplicate row
         # of clickable swatch dots was removed as redundant UI).
 
+        bg_card = self._settings_card(self.tab_customization, "Background")
+        bg_card.pack(fill="x", padx=UITheme.PAD_X, pady=(0, 8))
+
         self.gif_button = ctk.CTkButton(
-            self.tab_customization,
+            bg_card,
             text="Load Animated GIF Background",
             width=260,
             command=self.load_background_gif
         )
-        self.gif_button.pack(pady=(16, 8))
+        self.gif_button.pack(anchor="w", padx=16, pady=(4, 8))
+        self._style_button(self.gif_button, "secondary")
 
         self.clear_bg_button = ctk.CTkButton(
-            self.tab_customization,
+            bg_card,
             text="Clear Background",
             width=260,
-            fg_color="#e74c3c",
-            hover_color="#c0392b",
             command=self.clear_background
         )
-        self.clear_bg_button.pack(pady=(0,12))
+        self.clear_bg_button.pack(anchor="w", padx=16, pady=(0, 6))
+        self._style_button(self.clear_bg_button, "danger")
 
         # Cache-clearing moved to the Performance tab (it is maintenance,
         # not appearance).
 
-        self.bg_status = ctk.CTkLabel(self.tab_customization, text="No animated background loaded.", font=("Segoe UI", 12), text_color="#95a5a6")
-        self.bg_status.pack(pady=(6, 12))
+        self.bg_status = ctk.CTkLabel(
+            bg_card, text="No animated background loaded.",
+            font=UITheme.F(12), anchor="w", text_color="#95a5a6")
+        self.bg_status.pack(fill="x", padx=16, pady=(0, 12))
         self.tab_customization.place(relx=0, rely=0, relwidth=1, relheight=1)
 
     def build_performance_view(self):
         # Use a scrollable frame so all settings are reachable even on small screens
         saved = downloader.perf_cfg_from_prefs(self._prefs)
-        _saved_aria = saved['use_aria2']
-        _saved_connections = saved['aria2_connections']
-        _saved_frags = saved['concurrent_fragment_downloads']
+        _saved_aria = saved["use_aria2"]
+        _saved_connections = saved["aria2_connections"]
+        _saved_frags = saved["concurrent_fragment_downloads"]
 
-        scroll = ctk.CTkScrollableFrame(self.tab_performance, label_text="Performance Settings", fg_color="transparent")
+        # No label_text: the header title already says "Performance Settings".
+        scroll = ctk.CTkScrollableFrame(self.tab_performance, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=0, pady=0)
 
+        # Card 1: download tuning (+ Apply, which commits these controls).
+        tuning = self._settings_card(scroll, "Downloads")
+        tuning.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 8))
+
         self.aria2_var = tk.BooleanVar(value=_saved_aria)
-        self.aria2_chk = ctk.CTkCheckBox(scroll, text="Enable aria2 external downloader", variable=self.aria2_var)
-        self.aria2_chk.pack(anchor="w", padx=20, pady=(8, 0))
-        ctk.CTkLabel(scroll, text="Uses aria2 for parallel connections (faster downloads).", font=("Segoe UI", 11), text_color="#95a5a6", wraplength=600, justify="left").pack(anchor="w", padx=20, pady=(0, 2))
+        self.aria2_chk = ctk.CTkCheckBox(tuning, text="Enable aria2 external downloader", variable=self.aria2_var)
+        self.aria2_chk.pack(anchor="w", padx=16, pady=(4, 0))
+        ctk.CTkLabel(tuning, text="Uses aria2 for parallel connections (faster downloads).", font=UITheme.F(11), text_color="#95a5a6", wraplength=600, justify="left").pack(anchor="w", padx=16, pady=(0, 2))
 
-        ctk.CTkLabel(scroll, text="aria2 connections:  (max 16 — aria2 hard limit)", font=("Segoe UI", 12)).pack(anchor="w", padx=20, pady=(2, 0))
-        self.aria2_conn_slider = ctk.CTkSlider(scroll, from_=1, to=16, number_of_steps=15)
+        ctk.CTkLabel(tuning, text="aria2 connections:  (max 16 — aria2 hard limit)", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
+        self.aria2_conn_slider = ctk.CTkSlider(tuning, from_=1, to=16, number_of_steps=15)
         self.aria2_conn_slider.set(_saved_connections)
-        self.aria2_conn_slider.pack(padx=20, pady=(0, 2), fill="x")
+        self.aria2_conn_slider.pack(padx=16, pady=(0, 2), fill="x")
 
-        ctk.CTkLabel(scroll, text="Concurrent fragment downloads:", font=("Segoe UI", 12)).pack(anchor="w", padx=20, pady=(2, 0))
-        self.concurrent_frag_slider = ctk.CTkSlider(scroll, from_=1, to=32, number_of_steps=31)
+        ctk.CTkLabel(tuning, text="Concurrent fragment downloads:", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
+        self.concurrent_frag_slider = ctk.CTkSlider(tuning, from_=1, to=32, number_of_steps=31)
         self.concurrent_frag_slider.set(_saved_frags)
-        self.concurrent_frag_slider.pack(padx=20, pady=(0, 2), fill="x")
+        self.concurrent_frag_slider.pack(padx=16, pady=(0, 2), fill="x")
 
-        ctk.CTkLabel(scroll, text="SoundCloud downloads:", font=("Segoe UI", 12)).pack(anchor="w", padx=20, pady=(2, 0))
-        self.soundcloud_var = tk.BooleanVar(value=bool(self._prefs.get('soundcloud_direct_first', True)))
-        self.soundcloud_chk = ctk.CTkCheckBox(scroll, text="Try downloading from SoundCloud first, fall back to YouTube", variable=self.soundcloud_var, command=self.apply_soundcloud_pref)
-        self.soundcloud_chk.pack(anchor="w", padx=20, pady=(0, 4))
+        ctk.CTkLabel(tuning, text="SoundCloud downloads:", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
+        self.soundcloud_var = tk.BooleanVar(value=bool(self._prefs.get("soundcloud_direct_first", True)))
+        self.soundcloud_chk = ctk.CTkCheckBox(tuning, text="Try downloading from SoundCloud first, fall back to YouTube", variable=self.soundcloud_var, command=self.apply_soundcloud_pref)
+        self.soundcloud_chk.pack(anchor="w", padx=16, pady=(0, 4))
 
         # Video download quality cap (the AE re-encode downscales anyway).
-        ctk.CTkLabel(scroll, text="Max video resolution:", font=("Segoe UI", 12)).pack(anchor="w", padx=20, pady=(2, 0))
-        self.video_res_var = tk.StringVar(value=str(self._prefs.get('max_video_resolution', 'Best (up to 4K)')))
+        ctk.CTkLabel(tuning, text="Max video resolution:", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
+        self.video_res_var = tk.StringVar(value=str(self._prefs.get("max_video_resolution", "Best (up to 4K)")))
         self.video_res_menu = ctk.CTkOptionMenu(
-            scroll, values=downloader.VIDEO_RESOLUTION_OPTIONS, variable=self.video_res_var,
+            tuning, values=downloader.VIDEO_RESOLUTION_OPTIONS, variable=self.video_res_var,
             command=self._on_video_res_change, width=200)
-        self.video_res_menu.pack(anchor="w", padx=20, pady=(0, 4))
+        self.video_res_menu.pack(anchor="w", padx=16, pady=(0, 4))
+        self._style_option_menu(self.video_res_menu)
 
         # Filename template (yt-dlp output template). Empty = default %(title)s.%(ext)s.
-        ctk.CTkLabel(scroll, text="Filename template (optional):", font=("Segoe UI", 12)).pack(anchor="w", padx=20, pady=(2, 0))
-        self.filename_template_entry = ctk.CTkEntry(scroll, width=380, height=28,
+        ctk.CTkLabel(tuning, text="Filename template (optional):", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
+        self.filename_template_entry = ctk.CTkEntry(tuning, width=380, height=28,
             placeholder_text="e.g. %(artist)s - %(title)s.%(ext)s  (leave blank for default)")
-        self.filename_template_entry.insert(0, str(self._prefs.get('filename_template', '') or ''))
-        self.filename_template_entry.pack(anchor="w", padx=20, pady=(0, 4))
+        self.filename_template_entry.insert(0, str(self._prefs.get("filename_template", "") or ""))
+        self.filename_template_entry.pack(anchor="w", padx=16, pady=(0, 4))
 
-        # Maintenance actions
-        self.apply_perf_btn = ctk.CTkButton(scroll, text="Apply Performance Settings", command=self.apply_performance_settings, width=260)
-        self.apply_perf_btn.pack(pady=(4, 4))
+        self.apply_perf_btn = ctk.CTkButton(tuning, text="Apply Performance Settings", command=self.apply_performance_settings, width=260)
+        self.apply_perf_btn.pack(anchor="w", padx=16, pady=(6, 14))
+        self._style_button(self.apply_perf_btn, "primary")
+
+        # Card 2: maintenance actions.
+        maint = self._settings_card(scroll, "Maintenance")
+        maint.pack(fill="x", padx=UITheme.PAD_X, pady=(0, 14))
 
         self.ytdlp_update_btn = ctk.CTkButton(
-            scroll, text="⮔ Update yt-dlp", width=260,
-            fg_color="#2980b9", hover_color="#21618c",
+            maint, text="⫤ Update yt-dlp", width=260,
             cursor="hand2", command=self.update_ytdlp_clicked,
         )
-        self.ytdlp_update_btn.pack(pady=(2, 1))
+        self.ytdlp_update_btn.pack(anchor="w", padx=16, pady=(4, 1))
+        self._style_button(self.ytdlp_update_btn, "secondary")
         self.ytdlp_ver_lbl = ctk.CTkLabel(
-            scroll, text=f"yt-dlp version: {downloader.get_ytdlp_version() or 'not detected'}",
-            font=("Segoe UI", 10), text_color="#95a5a6",
+            maint, text=f"yt-dlp version: {downloader.get_ytdlp_version() or 'not detected'}",
+            font=UITheme.F(10), text_color="#95a5a6", anchor="w",
         )
-        self.ytdlp_ver_lbl.pack(pady=(0, 2))
+        self.ytdlp_ver_lbl.pack(anchor="w", padx=16, pady=(0, 2))
 
         self.app_update_btn = ctk.CTkButton(
-            scroll, text="🔄 Check for App Updates", width=260,
-            fg_color="#27ae60", hover_color="#1e8449",
+            maint, text="🔄 Check for App Updates", width=260,
             cursor="hand2", command=self.check_for_app_updates,
         )
-        self.app_update_btn.pack(pady=(0, 2))
+        self.app_update_btn.pack(anchor="w", padx=16, pady=(0, 2))
+        self._style_button(self.app_update_btn, "secondary")
 
         self.clear_cache_btn = ctk.CTkButton(
-            scroll, text="🧹 Clear Download Cache", width=260,
-            fg_color="#e74c3c", hover_color="#c0392b",
+            maint, text="🧹 Clear Download Cache", width=260,
             command=self.clear_download_cache,
         )
-        self.clear_cache_btn.pack(pady=(0, 2))
+        self.clear_cache_btn.pack(anchor="w", padx=16, pady=(0, 2))
+        self._style_button(self.clear_cache_btn, "danger")
 
-        self.perf_status = ctk.CTkLabel(scroll, text="Current: default", font=("Segoe UI", 11), text_color="#95a5a6")
-        self.perf_status.pack(pady=(2, 0))
+        self.perf_status = ctk.CTkLabel(maint, text="Current: default", font=UITheme.F(11), text_color="#95a5a6", anchor="w")
+        self.perf_status.pack(anchor="w", padx=16, pady=(2, 14))
 
     def apply_performance_settings(self):
         cfg = {
@@ -3130,7 +3425,7 @@ class UniversalAudioStudio(ctk.CTk):
             text_color="#ecf0f1",
             cursor="hand2",
             corner_radius=6,
-            font=("Segoe UI", 14, "bold"),
+            font=UITheme.F(14, "bold"),
             command=self.toggle_sidebar,
         )
         self.sb_toggle_btn.pack(fill="x", padx=8, pady=(10, 2))
@@ -3144,13 +3439,17 @@ class UniversalAudioStudio(ctk.CTk):
         self.sb_brand = ctk.CTkLabel(
             self.sidebar,
             text='🎵 TuneLab' if expanded else '🎵',
-            font=("Segoe UI", 15, "bold"),
+            font=UITheme.F(15, "bold"),
             text_color="#ecf0f1",
             anchor='w' if expanded else 'center',
         )
         self.sb_brand.pack(fill="x", padx=12, pady=(2, 2))
 
-        sep = ctk.CTkFrame(self.sidebar, height=1, fg_color="#2c3e50", corner_radius=0)
+        sep = ctk.CTkFrame(self.sidebar, height=1,
+                           fg_color=(self._palette.get("sidebar_active")
+                                     or UITheme.SIDEBAR_ACTIVE),
+                           corner_radius=0)
+        setattr(sep, "_theme_roles", {"fg_color": "sidebar_active"})
         sep.pack(fill="x", padx=10, pady=(4, 10))
 
         self._sb_items = {
@@ -3183,7 +3482,7 @@ class UniversalAudioStudio(ctk.CTk):
                 text_color="#ecf0f1",
                 cursor="hand2",
                 corner_radius=8,
-                font=("Segoe UI", 17 if not expanded else 13),
+                font=UITheme.F(17 if not expanded else 13),
                 height=42,
                 width=46 if not expanded else 180,
                 command=lambda n=name: self.show_frame(n),
@@ -3225,7 +3524,7 @@ class UniversalAudioStudio(ctk.CTk):
                 btn.configure(
                     text=f'{icon}  {label}' if expanded else icon,
                     anchor='w' if expanded else 'center',
-                    font=("Segoe UI", 16 if not expanded else 13),
+                    font=UITheme.F(16 if not expanded else 13),
                     width=44 if not expanded else 180,
                 )
             except Exception:
@@ -3342,7 +3641,7 @@ class UniversalAudioStudio(ctk.CTk):
                     tp,
                     padx=9,
                     pady=4,
-                    font=("Segoe UI", 10),
+                    font=UITheme.F(10),
                 )
                 self._sb_tooltip_lbl.pack()
                 self._sb_tooltip = tp
@@ -3396,6 +3695,111 @@ class UniversalAudioStudio(ctk.CTk):
             pass
         return color
 
+    # Semantic button roles: one accent per screen (primary), a neutral
+    # secondary, danger for destructive actions — no per-widget color
+    # improvisation. Maps widget option -> palette role.
+    _BTN_ROLES = {
+        "primary":   {"fg_color": "accent", "hover_color": "accent_hover"},
+        "secondary": {"fg_color": "sidebar_active", "hover_color": "hover"},
+        "danger":    {"fg_color": "danger", "hover_color": "danger_hover"},
+        "success":   {"fg_color": "success", "hover_color": "success_hover"},
+        "warning":   {"fg_color": "warning", "hover_color": "warning_hover"},
+        "purple":    {"fg_color": "purple", "hover_color": "purple_hover"},
+        "ghost":     {"hover_color": "hover"},
+    }
+
+    def _style_button(self, btn, role: str):
+        """Paint *btn* with the semantic palette *role*.
+
+        Build-time colors come from the active palette instead of
+        hardcoded hexes, the label color is chosen for WCAG contrast
+        against the fill (``_on_color``), and the option->role mapping is
+        remembered on the widget (``_theme_roles``) so every later theme
+        switch repaints it too.
+        """
+        pal = getattr(self, "_palette", {}) or {}
+        roles = self._BTN_ROLES.get(role)
+        if not roles:
+            return btn
+        colors: dict[str, str] = {}
+        for opt, role_name in roles.items():
+            val = pal.get(role_name)
+            if val:
+                colors[opt] = val
+        if role == "ghost":
+            colors.setdefault("fg_color", "transparent")
+        fill = colors.get("fg_color", "transparent")
+        if fill == "transparent":
+            colors["text_color"] = pal.get("text", "#ecf0f1")
+        else:
+            colors["text_color"] = _on_color(
+                fill, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24"))
+        try:
+            btn.configure(**colors)
+        except Exception:
+            logger.debug("Styling button as %r failed", role, exc_info=True)
+        try:
+            tag = dict(getattr(btn, "_theme_roles", None) or {})
+            tag.update(roles)
+            tag["text_color"] = (
+                "text" if colors.get("text_color") == pal.get("text") else "bg")
+            setattr(btn, "_theme_roles", tag)
+        except Exception:
+            pass
+        return btn
+
+    def _style_option_menu(self, menu):
+        """Theme a CTkOptionMenu: neutral panel + accent select button."""
+        pal = getattr(self, "_palette", {}) or {}
+        fill = pal.get("sidebar_active", "#2c3e50")
+        text = _on_color(
+            fill, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24"))
+        colors = {
+            "fg_color": fill,
+            "button_color": pal.get("accent", "#3498db"),
+            "button_hover_color": pal.get("accent_hover", "#2980b9"),
+            "text_color": text,
+        }
+        try:
+            menu.configure(**colors)
+        except Exception:
+            logger.debug("Styling option menu failed", exc_info=True)
+        try:
+            setattr(menu, "_theme_roles", {
+                "fg_color": "sidebar_active",
+                "button_color": "accent",
+                "button_hover_color": "accent_hover",
+                "text_color": "text" if text == pal.get("text") else "bg",
+            })
+        except Exception:
+            pass
+        return menu
+
+    def _settings_card(self, parent, title):
+        """Bordered card with a section header.
+
+        The settings pages group their controls into these instead of one
+        flat undifferentiated list. Colors come from the palette and the
+        option->role pairs are tagged so theme switches repaint the card.
+        """
+        pal = getattr(self, "_palette", {}) or {}
+        card = ctk.CTkFrame(
+            parent,
+            corner_radius=UITheme.RADIUS_LG,
+            fg_color=pal.get("sidebar", "#1b2532"),
+            border_width=1,
+            border_color=pal.get("hover", "#34495e"),
+        )
+        setattr(card, "_theme_roles",
+                {"fg_color": "sidebar", "border_color": "hover"})
+        hdr = ctk.CTkLabel(
+            card, text=title, font=UITheme.F(13, "bold"), anchor="w",
+            text_color=pal.get("text", "#ecf0f1"),
+        )
+        hdr.pack(fill="x", padx=16, pady=(12, 4))
+        setattr(hdr, "_theme_roles", {"text_color": "text"})
+        return card
+
     def _iter_widgets(self, root=None):
         if root is None:
             root = self
@@ -3419,11 +3823,10 @@ class UniversalAudioStudio(ctk.CTk):
         except Exception:
             pass
 
-        # Match Light/Dark appearance so entries/menus follow the palette.
+        # Match Light/Dark appearance so entries/menus follow the palette —
+        # the palette owns the mode now (the Theme Mode dropdown is gone).
         try:
             ctk.set_appearance_mode('Light' if pal.get('mode') == 'light' else 'Dark')
-            if hasattr(self, 'mode_option'):
-                self.mode_option.set('Light' if pal.get('mode') == 'light' else 'Dark')
         except Exception:
             pass
 
@@ -3449,7 +3852,8 @@ class UniversalAudioStudio(ctk.CTk):
         # each widget remembers which role each option holds, so switching
         # between themes keeps working even though old values are long gone.
         roles_seen = ('fg_color', 'hover_color', 'border_color',
-                      'text_color', 'progress_color', 'button_color')
+                      'text_color', 'progress_color', 'button_color',
+                      'button_hover_color')
         for w in self._iter_widgets():
             try:
                 roles = getattr(w, '_theme_roles', None)
@@ -3484,16 +3888,20 @@ class UniversalAudioStudio(ctk.CTk):
             self.nav_indicator.configure(fg_color=pal['accent'])
         except Exception:
             pass
-        # tk.Listbox has no fg_color option, so the role walk above never
-        # sees it; recolor it explicitly or the queue keeps its hardcoded
-        # dark rows after switching to a Light theme.
+        # Queue rows are CTk widgets now, but their palette-derived colors
+        # are plain values the role walk can't discover — re-feed them
+        # explicitly so a theme switch repaints panel, rows and selection.
         try:
-            self.queue_listbox.configure(
-                bg=pal.get('sidebar_active', '#2c3e50'),
-                fg=pal.get('text', '#ecf0f1'),
-                selectbackground=pal.get('accent', '#3498db'),
-                selectforeground=pal.get('text', '#ecf0f1'),
-            )
+            qrows = getattr(self, "queue_rows", None)
+            if qrows is not None:
+                qrows.configure(
+                    bg=pal.get('sidebar_active', '#2c3e50'),
+                    fg=pal.get('text', '#ecf0f1'),
+                    selectbackground=pal.get('accent', '#3498db'),
+                    selectforeground=_on_color(
+                        pal.get('accent', '#3498db'),
+                        pal.get('text', '#ecf0f1'), pal.get('bg', '#1e1e24')),
+                )
         except Exception:
             pass
         for bar_name in ('progress_bar', 'studio_progress_bar'):
@@ -3522,7 +3930,7 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Checkboxes: checked fill follows the accent.
         for cb_name in ('overlay_chk', 'compact_chk', 'opacity_chk', 'disable_max_chk',
-                        'nav_anim_chk', 'aria2_chk'):
+                        'nav_anim_chk', 'aria2_chk', 'soundcloud_chk'):
             cb = getattr(self, cb_name, None)
             if cb is not None:
                 try:
@@ -3543,10 +3951,6 @@ class UniversalAudioStudio(ctk.CTk):
                 )
             except Exception:
                 pass
-
-    def change_appearance_mode(self, mode):
-        ctk.set_appearance_mode(mode)
-        self._set_pref('theme_mode', mode)
 
     def load_background_gif(self):
         if Image is None:
