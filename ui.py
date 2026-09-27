@@ -1299,13 +1299,8 @@ class UniversalAudioStudio(ctk.CTk):
         )
         self.dl_status.pack(side="left", padx=(0, 12))
         setattr(self.dl_status, "_theme_roles", {"text_color": "text"})
-        try:
-            self.header_status_lbl.configure(
-                text="System Ready",
-                text_color=self.dl_status.cget("text_color"),
-            )
-        except Exception:
-            pass
+        # The header status slot stays empty while idle (see update_dl_status):
+        # a permanent "System Ready" stamped on every tab is chrome noise.
 
         # Progress row: bar + cancel side by side. Cancel only enables while
         # a download is in flight, so it no longer deserves its own row.
@@ -2855,17 +2850,27 @@ class UniversalAudioStudio(ctk.CTk):
         role = LEGACY_HEX_ROLES.get(str(color).lower())
 
         def _apply():
-            targets = (getattr(self, "dl_status", None),
-                       getattr(self, "header_status_lbl", None))
-            for lbl in targets:
-                if lbl is None:
-                    continue
-                try:
-                    lbl.configure(text=text, text_color=themed)
+            # The pill on the Downloader tab always shows the status...
+            try:
+                self.dl_status.configure(text=text, text_color=themed)
+                if role:
+                    setattr(self.dl_status, "_theme_roles", {"text_color": role})
+            except Exception:
+                pass
+            # ...while the header slot mirrors only live state: idle
+            # ("System Ready") maps to empty text so every tab isn't
+            # permanently stamped with filler.
+            try:
+                hdr = getattr(self, "header_status_lbl", None)
+                if hdr is not None:
+                    hdr.configure(
+                        text="" if str(text).strip() == "System Ready" else text,
+                        text_color=themed,
+                    )
                     if role:
-                        setattr(lbl, "_theme_roles", {"text_color": role})
-                except Exception:
-                    pass
+                        setattr(hdr, "_theme_roles", {"text_color": role})
+            except Exception:
+                pass
             # The pill's dot echoes the status color.
             try:
                 self._status_dot.configure(text_color=themed)

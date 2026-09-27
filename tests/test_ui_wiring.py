@@ -399,6 +399,11 @@ class PageTitleTests(unittest.TestCase):
         self.assertIn("header_status_lbl", _source())
         body = _method_source("update_dl_status")
         self.assertIn("header_status_lbl", body)
+        # Quiet while idle: "System Ready" must not stamp every tab, and
+        # the build must not seed the slot with filler either.
+        self.assertIn('"System Ready"', body)
+        self.assertNotIn(
+            "header_status_lbl", _method_source("build_downloader_view"))
 
 
 class MergedThemeControlTests(unittest.TestCase):
