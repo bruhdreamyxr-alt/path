@@ -973,17 +973,6 @@ class UniversalAudioStudio(ctk.CTk):
         )
         self.title_lbl.pack(side="left")
 
-        # Right side of the header: live status slot. Download/queue state
-        # stays readable from every page, not just the Downloader tab.
-        self.header_status_lbl = ctk.CTkLabel(
-            self._header_frame,
-            text="",
-            font=UITheme.F(11),
-            anchor="e",
-            justify="right",
-        )
-        self.header_status_lbl.pack(side="right", padx=(12, 0))
-
         # Central content area (pages are swapped inside here)
         self.content_frame = ctk.CTkFrame(self.main_container, fg_color=UITheme.SURFACE_BG, corner_radius=UITheme.RADIUS_CARD)
         self.content_frame.pack(
@@ -1299,8 +1288,6 @@ class UniversalAudioStudio(ctk.CTk):
         )
         self.dl_status.pack(side="left", padx=(0, 12))
         setattr(self.dl_status, "_theme_roles", {"text_color": "text"})
-        # The header status slot stays empty while idle (see update_dl_status):
-        # a permanent "System Ready" stamped on every tab is chrome noise.
 
         # Progress row: bar + cancel side by side. Cancel only enables while
         # a download is in flight, so it no longer deserves its own row.
@@ -2845,30 +2832,18 @@ class UniversalAudioStudio(ctk.CTk):
 
     def update_dl_status(self, text, color):
         themed = self._map_color(color)
-        # Remember the palette role on both labels so a theme switch while
-        # a status is showing repaints them instead of freezing the old hue.
+        # Remember the palette role so a theme switch while a status is
+        # showing repaints the pill instead of freezing the old hue.
         role = LEGACY_HEX_ROLES.get(str(color).lower())
 
         def _apply():
-            # The pill on the Downloader tab always shows the status...
+            # The status pill on the Downloader tab is the single home of
+            # download status — there is deliberately no second copy in the
+            # header (a duplicate "Finished!" up there was just noise).
             try:
                 self.dl_status.configure(text=text, text_color=themed)
                 if role:
                     setattr(self.dl_status, "_theme_roles", {"text_color": role})
-            except Exception:
-                pass
-            # ...while the header slot mirrors only live state: idle
-            # ("System Ready") maps to empty text so every tab isn't
-            # permanently stamped with filler.
-            try:
-                hdr = getattr(self, "header_status_lbl", None)
-                if hdr is not None:
-                    hdr.configure(
-                        text="" if str(text).strip() == "System Ready" else text,
-                        text_color=themed,
-                    )
-                    if role:
-                        setattr(hdr, "_theme_roles", {"text_color": role})
             except Exception:
                 pass
             # The pill's dot echoes the status color.

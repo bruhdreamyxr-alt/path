@@ -395,15 +395,14 @@ class PageTitleTests(unittest.TestCase):
     def test_performance_scroll_does_not_repeat_the_header_title(self):
         self.assertNotIn('label_text="Performance Settings"', _source())
 
-    def test_header_carries_a_live_status_slot(self):
-        self.assertIn("header_status_lbl", _source())
+    def test_no_second_status_copy_in_the_header(self):
+        # The Downloader pill is the single home of download status; a
+        # mirrored "Finished!" in the header corner was duplicate noise.
+        src = _source()
+        self.assertNotIn("header_status_lbl", src)
         body = _method_source("update_dl_status")
-        self.assertIn("header_status_lbl", body)
-        # Quiet while idle: "System Ready" must not stamp every tab, and
-        # the build must not seed the slot with filler either.
-        self.assertIn('"System Ready"', body)
-        self.assertNotIn(
-            "header_status_lbl", _method_source("build_downloader_view"))
+        self.assertIn("dl_status", body)
+        self.assertIn("_status_dot", body)
 
 
 class MergedThemeControlTests(unittest.TestCase):
