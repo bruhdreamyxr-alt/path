@@ -3159,7 +3159,8 @@ class UniversalAudioStudio(ctk.CTk):
         self.soundcloud_chk = ctk.CTkCheckBox(tuning, text="Try downloading from SoundCloud first, fall back to YouTube", variable=self.soundcloud_var, command=self.apply_soundcloud_pref)
         self.soundcloud_chk.pack(anchor="w", padx=16, pady=(0, 4))
 
-        # Video download quality cap (the AE re-encode downscales anyway).
+        # Video download quality cap (saves time/disk when 4K isn't needed;
+        # the AE re-encode keeps the source resolution — it does not downscale).
         ctk.CTkLabel(tuning, text="Max video resolution:", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
         self.video_res_var = tk.StringVar(value=str(self._prefs.get("max_video_resolution", "Best (up to 4K)")))
         self.video_res_menu = ctk.CTkOptionMenu(

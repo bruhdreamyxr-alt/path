@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from typing import Any
 
 import downloader
 import download_queue
@@ -320,6 +321,160 @@ class Aria2CommandLineTests(unittest.TestCase):
             "ERROR: aria2c exited with code 1"
         )
         self.assertTrue(downloader._is_aria2_failure(err))
+
+
+class VideoFormatSortTests(unittest.TestCase):
+    """Resolution must outrank codec in format_sort — the pixelation bug.
+
+    'vcodec:h264' used to come first, and yt-dlp ranks user sort fields
+    ahead of the defaults, so codec beat resolution: on a 4K video the
+    picker returned the top h264 rung (1080p @ ~4.2 Mbps) while 2160p
+    VP9 @ ~24 Mbps existed — a bitrate gap that reads exactly as the
+    blocky/pixelated output the user reported. These tests drive yt-dlp's
+    real FormatSorter over synthetic formats (no network) and pin the
+    shipped VIDEO_FORMAT_SORT_FIELDS.
+    """
+
+    # FormatSorter's constructor is untyped (yt-dlp ships no py.typed), so
+    # keep pyright from over-inferencing the class attrs these tests store.
+    _yt_dlp: Any = None
+    _FormatSorter: Any = None
+
+    FORMATS = [
+        {"format_id": "hdr2160", "url": "https://example.com/f", "height": 2160, "fps": 60,
+         "vcodec": "vp9", "acodec": "none", "ext": "webm",
+         "dynamic_range": "HDR10"},
+        {"format_id": "sdr2160", "url": "https://example.com/f", "height": 2160, "fps": 60,
+         "vcodec": "vp9", "acodec": "none", "ext": "webm"},
+        {"format_id": "h264_1080", "url": "https://example.com/f", "height": 1080, "fps": 60,
+         "vcodec": "h264", "acodec": "none", "ext": "mp4"},
+        {"format_id": "vp9_1080", "url": "https://example.com/f", "height": 1080, "fps": 60,
+         "vcodec": "vp9", "acodec": "none", "ext": "webm"},
+        {"format_id": "h264_720", "url": "https://example.com/f", "height": 720, "fps": 30,
+         "vcodec": "h264", "acodec": "none", "ext": "mp4"},
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import yt_dlp
+            from yt_dlp.utils._utils import FormatSorter
+        except ImportError as e:  # pragma: no cover - env without yt-dlp
+            raise unittest.SkipTest("yt-dlp not available: %s" % e)
+        cls._yt_dlp = yt_dlp
+        cls._FormatSorter = FormatSorter
+
+    def _best(self, formats, fields=None):
+        ydl = self._yt_dlp.YoutubeDL(
+            {"format_sort": list(fields or downloader.VIDEO_FORMAT_SORT_FIELDS)})
+        sorter = self._FormatSorter(ydl, [])
+        ranked = sorted((dict(f) for f in formats),
+                        key=sorter.calculate_preference)
+        return ranked[-1]["format_id"]  # yt-dlp keeps the maximum key
+
+    def test_resolution_outranks_codec(self):
+        # The exact regression: codec-first picked h264_1080 over sdr2160.
+        self.assertEqual(self._best(self.FORMATS), "sdr2160")
+
+    def test_h264_wins_a_resolution_tie(self):
+        tie = [f for f in self.FORMATS if f["height"] == 1080]
+        self.assertEqual(self._best(tie), "h264_1080")
+
+    def test_sdr_beats_hdr_at_a_tie(self):
+        # The AE re-encode does no tonemapping: HDR input would shift colors.
+        self.assertEqual(
+            self._best([self.FORMATS[0], self.FORMATS[1]]), "sdr2160")
+
+    def test_codec_still_preferred_where_it_used_to_matter(self):
+        # Old codec-first list must still pick h264 at equal resolution...
+        tie = [f for f in self.FORMATS if f["height"] == 1080]
+        self.assertEqual(
+            self._best(tie, ["vcodec:h264", "acodec:aac", "res", "quality"]),
+            "h264_1080")
+        # ...but that same list loses 4K, which is why it was replaced.
+        self.assertEqual(
+            self._best(self.FORMATS, ["vcodec:h264", "acodec:aac", "res", "quality"]),
+            "h264_1080")
+
+    def test_build_opts_uses_the_shared_resolution_first_sort(self):
+        opts = downloader.build_fast_yt_dlp_options(
+            "/tmp", "x.%(ext)s", audio_only=False)
+        fields = opts["format_sort"]
+        self.assertEqual(fields[0], "res")
+        self.assertLess(
+            fields.index("res"),
+            next(i for i, f in enumerate(fields) if f.startswith("vcodec")))
+
+    def test_audio_options_have_no_video_sort(self):
+        opts = downloader.build_fast_yt_dlp_options(
+            "/tmp", "x.%(ext)s", audio_only=True)
+        self.assertNotIn("format_sort", opts)
+
+
+class FallbackFormatSortTests(unittest.TestCase):
+    """The yt-dlp.exe fallback must apply the same resolution-first sort."""
+
+    def _capture_video_args(self, audio_only=False, format_override=None):
+        captured = {}
+        orig_run = downloader._run_yt_dlp_exe
+        try:
+            downloader._run_yt_dlp_exe = (
+                lambda args, status_callback=None: captured.setdefault("args", args)
+            )
+            downloader._fallback_download_with_ytdlp_exe(
+                "https://example.com/x",
+                "%(title)s.%(ext)s",
+                audio_only=audio_only,
+                status_callback=lambda msg, color: None,
+                perf_cfg={"use_aria2": False},
+                format_override=format_override,
+            )
+        finally:
+            downloader._run_yt_dlp_exe = orig_run
+        return captured["args"]
+
+    def test_video_branch_sorts_resolution_first(self):
+        args = self._capture_video_args()
+        self.assertIn("--format-sort", args)
+        value = args[args.index("--format-sort") + 1]
+        self.assertTrue(value.startswith("res,"), value)
+        self.assertIn("vcodec:h264", value)
+
+    def test_video_override_branch_also_sorts(self):
+        # download_video_mp4's fallback path passes the format through
+        # format_override; it must not lose the sort either.
+        args = self._capture_video_args(
+            format_override="bestvideo*+bestaudio/best")
+        self.assertIn("--format-sort", args)
+
+    def test_audio_branch_has_no_format_sort(self):
+        args = self._capture_video_args(audio_only=True)
+        self.assertNotIn("--format-sort", args)
+
+
+class AeReencodeArgsTests(unittest.TestCase):
+    """The AE re-encode must declare a spec-correct level and keep quality.
+
+    The forced '-level 4.0' was out of spec for >=1080p60/4K; hardware
+    decoders sized to the declared level glitch on out-of-spec streams —
+    scattered pixelated frames right after downloading.
+    """
+
+    def test_no_forced_level(self):
+        self.assertNotIn("-level", downloader._ae_reencode_args("a.mp4", "b.mp4"))
+
+    def test_keeps_visually_lossless_quality(self):
+        args = downloader._ae_reencode_args("a.mp4", "b.mp4")
+        self.assertEqual(args[:3], ["-y", "-i", "a.mp4"])
+        self.assertEqual(args[-1], "b.mp4")
+        self.assertEqual(args[args.index("-crf") + 1], "18")
+        self.assertEqual(args[args.index("-pix_fmt") + 1], "yuv420p")
+        self.assertEqual(args[args.index("-c:v") + 1], "libx264")
+
+    def test_timeout_survives_long_4k_encodes(self):
+        # 600s killed long re-encodes mid-way and silently left the
+        # AE-incompatible source file behind.
+        self.assertGreaterEqual(downloader.AE_REENCODE_TIMEOUT, 3600)
 
 
 if __name__ == "__main__":

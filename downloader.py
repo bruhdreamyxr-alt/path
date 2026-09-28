@@ -162,14 +162,31 @@ def video_format_string(max_resolution: str = 'Best (up to 4K)') -> str:
 
     'Best (up to 4K)' keeps the existing unrestricted behavior. Otherwise we
     restrict the video stream to the chosen height (e.g. 1080p -> bestvideo[height<=1080]),
-    which the After Effects re-encode step already downscales anyway, so it
-    saves time and disk on large 4K downloads.
+    which saves time, disk and bandwidth when 4K isn't needed — the AE
+    re-encode keeps the source resolution, it does not downscale.
     """
     height = _VIDEO_RESOLUTION_MAP.get(max_resolution)
     if height is None or height == 'best':
         # No cap requested (or unrecognized value) — unrestricted best.
         return 'bestvideo*+bestaudio/best'
     return f'bestvideo[height<={height}]+bestaudio/best[height<={height}]/best'
+
+
+# Resolution-first format sorting for video downloads.
+#
+# 'vcodec:h264' used to come BEFORE 'res', and yt-dlp ranks user sort
+# fields ahead of the defaults — so codec outranked resolution and
+# "Best (up to 4K)" silently picked the top h264 rung (typically 1080p,
+# sometimes only 720p) over 4K VP9/AV1: measured 1080p h264 @ 4.2 Mbps
+# where 2160p VP9 @ 24 Mbps existed. That bitrate gap is exactly the
+# blocky/pixelated look users reported. Now:
+#   res     — always take the highest resolution offered;
+#   +hdr    — prefer SDR at a tie (the AE re-encode does no tonemapping,
+#             so HDR input would come out with shifted colors);
+#   vcodec  — h264 wins any resolution tie, which keeps the common case
+#             re-encode-free; ensure_after_effects_compatibility still
+#             converts the occasional VP9/AV1 pick to H.264+AAC.
+VIDEO_FORMAT_SORT_FIELDS = ['res', '+hdr', 'vcodec:h264', 'acodec:aac', 'quality']
 
 performance_config = dict(DEFAULT_PERF_CONFIG)
 
@@ -996,8 +1013,9 @@ def build_fast_yt_dlp_options(base_dir, output_template, audio_only: bool = Fals
     if isinstance(perf_cfg, dict):
         cfg.update(perf_cfg)
     # yt-dlp options are a loose dict; type-checkers often treat values as Unknown.
-    # For video, cap the resolution if the user picked one (saves time/disk since
-    # the After Effects re-encode downscales anyway).
+    # For video, cap the resolution if the user picked one — saves time, disk
+    # and bandwidth when 4K isn't needed (the AE re-encode keeps the source
+    # resolution; it does not downscale).
     if audio_only:
         base_format = 'bestaudio/best'
     else:
@@ -1076,9 +1094,11 @@ def build_fast_yt_dlp_options(base_dir, output_template, audio_only: bool = Fals
         ydl_opts['writesubtitles'] = False
         # Prefer codecs After Effects can import directly. AV1 (av01),
         # 10-bit HEVC/H.264 and Opus audio are common yt-dlp picks that VLC
-        # plays but AE rejects, so sort for H.264 + AAC 8-bit when available;
-        # ensure_after_effects_compatibility re-encodes only when needed.
-        ydl_opts['format_sort'] = ['vcodec:h264', 'acodec:aac', 'res', 'quality']
+        # plays but AE rejects. Resolution still outranks codec (see
+        # VIDEO_FORMAT_SORT_FIELDS) so the resolution cap and "Best (up to
+        # 4K)" keep their promise; AE compatibility is finished by
+        # ensure_after_effects_compatibility, which re-encodes only when needed.
+        ydl_opts['format_sort'] = list(VIDEO_FORMAT_SORT_FIELDS)
 
     if audio_only:
         fmt = AUDIO_FORMATS.get(_CURRENT_AUDIO_FORMAT, AUDIO_FORMATS['mp3_vbr'])
@@ -1972,6 +1992,10 @@ def _fallback_download_with_ytdlp_exe(
         cmd += ['-f', format_override]
         if not audio_only:
             cmd += ['--merge-output-format', 'mp4', '--remux-video', 'mp4']
+            # Same resolution-first sort as the Python path (parity: without
+            # it the fallback silently picked VP9/AV1 regardless of codec
+            # preference, or the old codec-first quality cap).
+            cmd += ['--format-sort', ','.join(VIDEO_FORMAT_SORT_FIELDS)]
     elif audio_only:
         fmt = AUDIO_FORMATS.get(_CURRENT_AUDIO_FORMAT, AUDIO_FORMATS['mp3_vbr'])
         cmd += ['-f', 'bestaudio/best']
@@ -1984,6 +2008,7 @@ def _fallback_download_with_ytdlp_exe(
     else:
         cmd += ['-f', 'bestvideo*+bestaudio/best']
         cmd += ['--merge-output-format', 'mp4', '--remux-video', 'mp4']
+        cmd += ['--format-sort', ','.join(VIDEO_FORMAT_SORT_FIELDS)]
 
     # Concurrency knobs: best-effort, older yt-dlp.exe may not support them
     concurrency_flags = []
@@ -2951,6 +2976,29 @@ def _needs_ae_reencode(filepath):
     return False
 
 
+# A 4K re-encode at crf 18 runs for minutes; the old 600s cap killed
+# longer encodes mid-way and silently left the AE-incompatible source
+# behind (the exception path returns the original file).
+AE_REENCODE_TIMEOUT = 3600
+
+
+def _ae_reencode_args(src: str, dst: str) -> list:
+    """ffmpeg argv for the AE-compat re-encode (pure; pinned by tests).
+
+    No forced ``-level``: the old ``-level 4.0`` is out of spec for
+    >=1080p60/4K content, and hardware decoders sized to the declared
+    level glitch on out-of-spec streams — scattered pixelated frames.
+    x264 derives the correct level from the actual resolution/fps.
+    """
+    return [
+        "-y", "-i", src,
+        "-c:v", "libx264", "-profile:v", "high",
+        "-pix_fmt", "yuv420p", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+        "-movflags", "+faststart", dst,
+    ]
+
+
 def _reencode_for_ae(filepath):
     ffmpeg = _get_ffmpeg_bin()
     if not ffmpeg or not os.path.exists(filepath):
@@ -2958,13 +3006,9 @@ def _reencode_for_ae(filepath):
     tmp = filepath + ".ae_fix.mp4"
     try:
         completed = subprocess.run(
-            [ffmpeg, "-y", "-i", filepath,
-             "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
-             "-pix_fmt", "yuv420p", "-crf", "18",
-             "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-             "-movflags", "+faststart", tmp],
+            [ffmpeg] + _ae_reencode_args(filepath, tmp),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **_no_window_kwargs(), timeout=600,
+            **_no_window_kwargs(), timeout=AE_REENCODE_TIMEOUT,
         )
         if completed.returncode != 0:
             logger.warning("AE re-encode failed for %s", filepath)
