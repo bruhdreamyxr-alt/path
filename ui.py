@@ -220,6 +220,14 @@ class UITheme:
     RADIUS_MD = 10
     RADIUS_LG = 14
     RADIUS_CARD = 20
+    # Fields and menus sit between a control and a card: big enough to read
+    # as curved at a glance, small enough not to balloon a 32px-tall box.
+    RADIUS_FIELD = 12
+    # Every raised surface (rail, content card, cards, row lists, fields)
+    # wears a hairline edge in the palette's ``hover`` tone. Without it a
+    # card whose fill is close to the window fill just looks like a flat
+    # rectangle, and rounded corners stop reading as rounded.
+    BORDER_W = 1
 
     # Collapsible sidebar dimensions
     SB_W_EXPANDED = 176
@@ -289,7 +297,10 @@ COLOR_THEMES = {
         'mode': 'dark',
     },
     'Gruvbox Dark': {
-        'bg': '#282828', 'surface': '#32302f', 'sidebar': '#282828',
+        # ``sidebar`` was bg (#282828): the rail had no fill of its own and read
+        # as a hairline outline drawn on the window rather than as a panel.
+        # bg0_hard is the same family one step down, like every other palette.
+        'bg': '#282828', 'surface': '#32302f', 'sidebar': '#1d2021',
         'sidebar_active': '#3c3836', 'hover': '#45403d',
         'accent': '#fabd2f', 'accent_hover': '#e3a91c',
         'text': '#ebdbb2', 'sub': '#aca195',
@@ -512,12 +523,19 @@ class _QueueRowList(ctk.CTkScrollableFrame):
             self._sel_bg, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24"))
         super().__init__(
             master,
-            fg_color=pal.get("sidebar_active", "#2c3e50"),
-            corner_radius=UITheme.RADIUS_MD,
+            # The page is a surface card; filling this with the same color would
+            # make its own corner notches paint themselves invisible, and it read
+            # as a flat ring instead of a well. The window background color sinks
+            # it into the card and the notches pick up the page's surface.
+            fg_color=pal.get("bg", "#1e1e24"),
+            corner_radius=UITheme.RADIUS_LG,
+            border_width=UITheme.BORDER_W,
+            border_color=pal.get("hover", "#34495e"),
             **kwargs,
         )
         # Let the theme walker repaint the panel like any other widget.
-        setattr(self, "_theme_roles", {"fg_color": "sidebar_active"})
+        setattr(self, "_theme_roles", {"fg_color": "bg",
+                                       "border_color": "hover"})
 
     # --- Listbox-compatible API (the only surface ui.py uses) ------
 
@@ -536,7 +554,7 @@ class _QueueRowList(ctk.CTkScrollableFrame):
             text=text,
             font=UITheme.F(11),
             anchor="w",
-            corner_radius=UITheme.RADIUS_SM,
+            corner_radius=UITheme.RADIUS_MD,
             fg_color="transparent",
             text_color=self._row_fg,
             cursor="hand2",
@@ -981,13 +999,20 @@ class UniversalAudioStudio(ctk.CTk):
         # -----------------
         self._sidebar_expanded = not bool(self._prefs.get("sidebar_collapsed", False))
         self._sb_anim_after_id = None
+        # A floating rounded rail rather than a flush panel: insetting it and
+        # giving it the card radius plus a hairline edge is what makes the
+        # window read as "curved" instead of four square slabs.
         self.sidebar = ctk.CTkFrame(
             self,
             width=UITheme.SB_W_EXPANDED if self._sidebar_expanded else UITheme.SB_W_COLLAPSED,
-            corner_radius=0,
-            fg_color=UITheme.SIDEBAR_BG,
+            corner_radius=UITheme.RADIUS_CARD,
+            fg_color=self._palette.get('sidebar', UITheme.SIDEBAR_BG),
+            border_width=UITheme.BORDER_W,
+            border_color=self._palette.get('hover', UITheme.SIDEBAR_HOVER),
         )
-        self.sidebar.pack(side="left", fill="y")
+        setattr(self.sidebar, "_theme_roles",
+                {"fg_color": "sidebar", "border_color": "hover"})
+        self.sidebar.pack(side="left", fill="y", padx=(12, 0), pady=12)
         self.sidebar.pack_propagate(False)
         self._sidebar_cur_w = UITheme.SB_W_EXPANDED if self._sidebar_expanded else UITheme.SB_W_COLLAPSED
 
@@ -998,7 +1023,8 @@ class UniversalAudioStudio(ctk.CTk):
         self.main_container.pack(side="left", fill="both", expand=True)
 
         self._header_frame = ctk.CTkFrame(self.main_container, fg_color="transparent", height=42)
-        self._header_frame.pack(fill="x", padx=18, pady=(14, 0))
+        # Lines the title up with the left edge of the content card below it.
+        self._header_frame.pack(fill="x", padx=12, pady=(14, 0))
         self.title_lbl = ctk.CTkLabel(
             self._header_frame,
             text="",
@@ -1007,11 +1033,14 @@ class UniversalAudioStudio(ctk.CTk):
         )
         self.title_lbl.pack(side="left")
 
-        # Central content area (pages are swapped inside here)
-        self.content_frame = ctk.CTkFrame(self.main_container, fg_color=UITheme.SURFACE_BG, corner_radius=UITheme.RADIUS_CARD)
+        # Central content area. This one deliberately stays a transparent
+        # hole: a filled frame here would paint its own square canvas over the
+        # rounded corners the pages draw, which is exactly what made the card
+        # look square. The pages below carry the surface, radius and edge.
+        self.content_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.content_frame.pack(
-            pady=10,
-            padx=14,
+            pady=12,
+            padx=(12, 12),
             fill="both",
             expand=True,
         )
@@ -1022,6 +1051,22 @@ class UniversalAudioStudio(ctk.CTk):
         self.tab_performance = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self.tab_queue = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self.tab_history = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+
+        # Every page is a card: same surface, same corner radius and same
+        # hairline edge as the dialogs. They are stacked in one hole and
+        # raised on switch, so they all need the identical shape or a switch
+        # would flash a differently edged panel.
+        for _page in (self.tab_downloader, self.tab_studio,
+                      self.tab_customization, self.tab_performance,
+                      self.tab_queue, self.tab_history):
+            _page.configure(
+                fg_color=self._palette.get('surface', UITheme.SURFACE_BG),
+                corner_radius=UITheme.RADIUS_CARD,
+                border_width=UITheme.BORDER_W,
+                border_color=self._palette.get('hover', UITheme.SIDEBAR_HOVER),
+            )
+            setattr(_page, "_theme_roles",
+                    {"fg_color": "surface", "border_color": "hover"})
 
         # --- Download queue manager (lazy import to avoid circular deps) ---
         self._queue_manager = None
@@ -1185,8 +1230,13 @@ class UniversalAudioStudio(ctk.CTk):
             self.tab_downloader,
             width=300,
             height=36,
+            corner_radius=UITheme.RADIUS_FIELD,
+            border_width=UITheme.BORDER_W,
+            border_color=(getattr(self, "_palette", {}) or {}).get(
+                "hover", UITheme.SIDEBAR_HOVER),
             placeholder_text="Paste link or search song name"
         )
+        setattr(self.url_entry, "_theme_roles", {"border_color": "hover"})
         self.url_entry.pack(pady=(14,8), padx=UITheme.PAD_X, fill="x")
 
         # Inline clear button: overlays the field's right edge and only shows
@@ -1196,7 +1246,7 @@ class UniversalAudioStudio(ctk.CTk):
             fg_color="transparent", corner_radius=12, cursor="hand2",
             command=self._on_clear_url_clicked,
         )
-        self._style_button(self.btn_clear_url, "ghost")
+        self._style_button(self.btn_clear_url, "ghost", bordered=False)
         try:
             # The ✕ should read as muted (sub), not full-strength text.
             sub = (getattr(self, "_palette", {}) or {}).get("sub", "#95a5a6")
@@ -1299,12 +1349,13 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_preview_video.bind("<Enter>", lambda e: self._set_hover_detail("Preview video in the stream player.", "#ecf0f1"))
         self.btn_preview_video.bind("<Leave>", lambda e: self._restore_hover_detail())
 
-        # Status pill: rounded chip + colored dot instead of bare text.
+        # Status pill: a true capsule (radius = half its height) + colored dot
+        # instead of bare text.
         pal = getattr(self, "_palette", {}) or {}
         pill_bg = pal.get("sidebar_active", UITheme.SIDEBAR_ACTIVE)
         self._status_pill = ctk.CTkFrame(
             self.tab_downloader,
-            corner_radius=UITheme.RADIUS_MD,
+            corner_radius=15,
             fg_color=pill_bg,
         )
         self._status_pill.pack(pady=(0, 6))
@@ -1313,14 +1364,14 @@ class UniversalAudioStudio(ctk.CTk):
             self._status_pill, text="●", font=UITheme.F(10),
             text_color=pal.get("sub", UITheme.COLOR_GRAY),
         )
-        self._status_dot.pack(side="left", padx=(12, 6))
+        self._status_dot.pack(side="left", padx=(14, 6), pady=(5, 5))
         setattr(self._status_dot, "_theme_roles", {"text_color": "sub"})
         self.dl_status = ctk.CTkLabel(
             self._status_pill, text="System Ready", font=UITheme.F(12),
             text_color=_on_color(
                 pill_bg, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24")),
         )
-        self.dl_status.pack(side="left", padx=(0, 12))
+        self.dl_status.pack(side="left", padx=(0, 14), pady=(5, 5))
         setattr(self.dl_status, "_theme_roles", {"text_color": "text"})
 
         # Progress row: bar + cancel side by side. Cancel only enables while
@@ -1785,7 +1836,12 @@ class UniversalAudioStudio(ctk.CTk):
         self.history_search_entry = ctk.CTkEntry(
             search_row, placeholder_text="🔍 Search by title or URL...",
             textvariable=self.history_search_var, height=32,
+            corner_radius=UITheme.RADIUS_FIELD,
+            border_width=UITheme.BORDER_W,
+            border_color=(getattr(self, "_palette", {}) or {}).get(
+                "hover", UITheme.SIDEBAR_HOVER),
         )
+        setattr(self.history_search_entry, "_theme_roles", {"border_color": "hover"})
         self.history_search_entry.pack(side="left", fill="x", expand=True)
         self.history_search_var.trace_add("write", lambda *_: self._refresh_history_view())
 
@@ -1805,7 +1861,23 @@ class UniversalAudioStudio(ctk.CTk):
             btn.pack(side="left", padx=2)
 
         # Scrollable list of history entries
-        self.history_scroll = ctk.CTkScrollableFrame(self.tab_history, label_text="Past Downloads")
+        _pal = getattr(self, "_palette", {}) or {}
+        self.history_scroll = ctk.CTkScrollableFrame(
+            self.tab_history, label_text="Past Downloads",
+            corner_radius=UITheme.RADIUS_LG,
+            border_width=UITheme.BORDER_W,
+            # Left on its defaults this panel kept CustomTkinter's own gray,
+            # which sat on top of the palette like a foreign window. The page is
+            # a surface card, so the well is the window background color: that
+            # contrast is also what makes its rounded corners visible.
+            fg_color=_pal.get("bg", UITheme.SURFACE_BG),
+            border_color=_pal.get("hover", UITheme.SIDEBAR_HOVER),
+            label_fg_color=_pal.get("hover", UITheme.SIDEBAR_HOVER),
+            label_text_color=_pal.get("text", "#ecf0f1"),
+        )
+        setattr(self.history_scroll, "_theme_roles",
+                {"fg_color": "bg", "border_color": "hover",
+                 "label_fg_color": "hover", "label_text_color": "text"})
         self.history_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 10))
 
         # Internal container for entry widgets (rebuilt on refresh)
@@ -2107,7 +2179,9 @@ class UniversalAudioStudio(ctk.CTk):
             else:
                 shown = detail
             box = ctk.CTkFrame(body, fg_color=field_bg,
-                               corner_radius=UITheme.RADIUS_SM)
+                               corner_radius=UITheme.RADIUS_FIELD,
+                               border_width=UITheme.BORDER_W,
+                               border_color=pal.get("hover", sub))
             box.pack(fill="x", anchor="w", pady=(12, 0))
             ctk.CTkLabel(box, text=shown, font=UITheme.F(10), text_color=sub,
                          wraplength=400, justify="left", anchor="w",
@@ -2127,7 +2201,9 @@ class UniversalAudioStudio(ctk.CTk):
             except Exception:
                 pass
 
-        ctk.CTkButton(row, text="OK", width=104, height=34, fg_color=accent,
+        ctk.CTkButton(row, text="OK", width=104, height=36,
+                      corner_radius=UITheme.RADIUS_MD,
+                      fg_color=accent,
                       hover_color=accent_hover, text_color=on_accent,
                       font=UITheme.F(12, "bold"),
                       command=_close).pack(side="right")
@@ -2140,8 +2216,9 @@ class UniversalAudioStudio(ctk.CTk):
                 except Exception:
                     logger.exception("Could not copy dialog detail")
 
-            ctk.CTkButton(row, text="Copy details", width=112, height=34,
-                          fg_color="transparent", border_width=1,
+            ctk.CTkButton(row, text="Copy details", width=112, height=36,
+                          corner_radius=UITheme.RADIUS_MD,
+                          fg_color="transparent", border_width=UITheme.BORDER_W,
                           border_color=pal.get("hover", sub), text_color=sub,
                           hover_color=pal.get("hover", bg),
                           font=UITheme.F(11),
@@ -2155,8 +2232,9 @@ class UniversalAudioStudio(ctk.CTk):
                 except Exception:
                     logger.exception("Dialog action %r failed", action_label)
 
-            ctk.CTkButton(row, text=action_label, width=112, height=34,
-                          fg_color="transparent", border_width=1,
+            ctk.CTkButton(row, text=action_label, width=112, height=36,
+                          corner_radius=UITheme.RADIUS_MD,
+                          fg_color="transparent", border_width=UITheme.BORDER_W,
                           border_color=accent, text_color=accent,
                           hover_color=pal.get("hover", bg),
                           font=UITheme.F(12, "bold"),
@@ -3742,7 +3820,7 @@ class UniversalAudioStudio(ctk.CTk):
             hover_color=UITheme.SIDEBAR_HOVER,
             text_color="#ecf0f1",
             cursor="hand2",
-            corner_radius=6,
+            corner_radius=UITheme.RADIUS_MD,
             font=UITheme.F(14, "bold"),
             command=self.toggle_sidebar,
         )
@@ -3799,7 +3877,7 @@ class UniversalAudioStudio(ctk.CTk):
                 hover_color=UITheme.SIDEBAR_HOVER,
                 text_color="#ecf0f1",
                 cursor="hand2",
-                corner_radius=8,
+                corner_radius=UITheme.RADIUS_MD,
                 font=UITheme.F(17 if not expanded else 13),
                 height=42,
                 width=46 if not expanded else 180,
@@ -4026,7 +4104,7 @@ class UniversalAudioStudio(ctk.CTk):
         "ghost":     {"hover_color": "hover"},
     }
 
-    def _style_button(self, btn, role: str):
+    def _style_button(self, btn, role: str, bordered: bool = True):
         """Paint *btn* with the semantic palette *role*.
 
         Build-time colors come from the active palette instead of
@@ -4034,6 +4112,12 @@ class UniversalAudioStudio(ctk.CTk):
         against the fill (``_on_color``), and the option->role mapping is
         remembered on the widget (``_theme_roles``) so every later theme
         switch repaints it too.
+
+        Shape is part of the recipe too: every button is lifted to the
+        shared control radius (a call site may ask for a rounder chip,
+        never a boxier one), and ghost buttons get the hairline outline
+        the dialogs use for secondary actions. Pass ``bordered=False`` for
+        a ghost control that already sits inside another outlined widget.
         """
         pal = getattr(self, "_palette", {}) or {}
         roles = self._BTN_ROLES.get(role)
@@ -4052,6 +4136,19 @@ class UniversalAudioStudio(ctk.CTk):
         else:
             colors["text_color"] = _on_color(
                 fill, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24"))
+        # Curved ends everywhere: a call site may ask for something rounder
+        # (a pill chip) but never boxier than the shared control radius.
+        try:
+            if int(btn.cget("corner_radius") or 0) < UITheme.RADIUS_MD:
+                colors["corner_radius"] = UITheme.RADIUS_MD
+        except Exception:
+            colors["corner_radius"] = UITheme.RADIUS_MD
+        if role == "ghost":
+            # Ghost means outlined — the dialog recipe. Filled buttons
+            # already separate themselves from the surface by their fill.
+            colors["border_width"] = UITheme.BORDER_W if bordered else 0
+            if bordered:
+                colors["border_color"] = pal.get("hover", "#34495e")
         try:
             btn.configure(**colors)
         except Exception:
@@ -4061,6 +4158,8 @@ class UniversalAudioStudio(ctk.CTk):
             tag.update(roles)
             tag["text_color"] = (
                 "text" if colors.get("text_color") == pal.get("text") else "bg")
+            if colors.get("border_color"):
+                tag["border_color"] = "hover"
             setattr(btn, "_theme_roles", tag)
         except Exception:
             pass
@@ -4077,6 +4176,9 @@ class UniversalAudioStudio(ctk.CTk):
             "button_color": pal.get("accent", "#3498db"),
             "button_hover_color": pal.get("accent_hover", "#2980b9"),
             "text_color": text,
+            "corner_radius": UITheme.RADIUS_FIELD,
+            "border_width": UITheme.BORDER_W,
+            "border_color": pal.get("hover", "#34495e"),
         }
         try:
             menu.configure(**colors)
@@ -4087,6 +4189,7 @@ class UniversalAudioStudio(ctk.CTk):
                 "fg_color": "sidebar_active",
                 "button_color": "accent",
                 "button_hover_color": "accent_hover",
+                "border_color": "hover",
                 "text_color": "text" if text == pal.get("text") else "bg",
             })
         except Exception:
@@ -4171,7 +4274,8 @@ class UniversalAudioStudio(ctk.CTk):
         # between themes keeps working even though old values are long gone.
         roles_seen = ('fg_color', 'hover_color', 'border_color',
                       'text_color', 'progress_color', 'button_color',
-                      'button_hover_color')
+                      'button_hover_color', 'label_fg_color',
+                      'label_text_color')
         for w in self._iter_widgets():
             try:
                 roles = getattr(w, '_theme_roles', None)
@@ -4213,7 +4317,7 @@ class UniversalAudioStudio(ctk.CTk):
             qrows = getattr(self, "queue_rows", None)
             if qrows is not None:
                 qrows.configure(
-                    bg=pal.get('sidebar_active', '#2c3e50'),
+                    bg=pal.get('bg', '#2c3e50'),
                     fg=pal.get('text', '#ecf0f1'),
                     selectbackground=pal.get('accent', '#3498db'),
                     selectforeground=_on_color(
