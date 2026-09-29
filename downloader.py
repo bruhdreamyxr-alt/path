@@ -1033,6 +1033,18 @@ def build_fast_yt_dlp_options(base_dir, output_template, audio_only: bool = Fals
         'retries': 5,
         'fragment_retries': 10,
         'continue': True,  # resume interrupted .part downloads (aria2 also gets -c below)
+        # An explicit download action must always produce the file. yt-dlp's
+        # default never replaces an existing *finished* media file: it prints
+        # "has already been downloaded" and returns SUCCESS without fetching
+        # anything, so the UI reported "Finished" for a download that never
+        # happened (typical trigger: a second captionless Instagram post from
+        # the same account titles identically to the first one - also fixed
+        # per-post by media_output_template). The flag only gates that
+        # already-complete check: interrupted .part downloads still resume,
+        # and the previous file survives until the new one is finalised
+        # (downloads complete via .part then atomic replace), so a failed
+        # attempt cannot destroy the old copy.
+        'overwrites': True,
         'skip_unavailable_fragments': False,  # False = retry failed fragments instead of silently dropping them (dropping causes pixelated/blocky frames)
         'socket_timeout': 20,
         'concurrent_fragment_downloads': 8,
@@ -1944,9 +1956,13 @@ def _fallback_download_with_ytdlp_exe(
     if isinstance(perf_cfg, dict):
         cfg.update(perf_cfg)
 
+    # --force-overwrites mirrors overwrites=True from build_fast_yt_dlp_options:
+    # the packaged EXE must never "succeed" by pointing at a same-named file
+    # it did not download.
     cmd = [
         '--no-playlist',
         '--continue',
+        '--force-overwrites',
         '--retries', '5',
         '--fragment-retries', '10',
         '--socket-timeout', '20',
@@ -2538,7 +2554,7 @@ def download_track(
 ) -> None:
     base_dir = get_base_dir()
     download_folder = get_download_folder()
-    output_template = os.path.join(download_folder, "%(title)s.%(ext)s")
+    output_template = media_output_template(download_folder, raw_input)
 
     # Snapshot the folder so artwork targeting prefers files created by THIS
     # download rather than an unrelated newest MP3 (e.g. from another app).
@@ -3067,6 +3083,25 @@ def _latest_video_file(folder, before):
     return max(mp4 or pool)[1]
 
 
+def media_output_template(download_folder, url: str) -> str:
+    """Default yt-dlp output template for a media download.
+
+    Captionless Instagram posts get the title "Video by <username>" from
+    yt-dlp, so every post from one creator lands on the SAME filename --
+    and because yt-dlp refuses to overwrite an existing finished video
+    file by default, downloading a second post from the same account used
+    to be silently skipped as "already downloaded" (see the 'overwrites'
+    note in build_fast_yt_dlp_options). Including the post id (a unique
+    shortcode for posts/reels) gives every download its own file. Other
+    platforms carry unique ids inside their titles already and keep the
+    clean name; the suffix also harmlessly rides along when an Instagram
+    download falls back to a search on another site.
+    """
+    if _INSTAGRAM_URL_RE.search(url or ''):
+        return os.path.join(download_folder, '%(title)s [%(id)s].%(ext)s')
+    return os.path.join(download_folder, '%(title)s.%(ext)s')
+
+
 def download_video_mp4(
     url: str,
     status_callback: Callable[[str, str], Any],
@@ -3075,9 +3110,13 @@ def download_video_mp4(
     progress_callback: Optional[Callable[[float], Any]] = None,
     ) -> None:
     download_folder = get_download_folder()
+    # Bound once so every path below (python API, yt-dlp.exe, direct-media
+    # and search fallbacks) names the file identically - a retried or
+    # fallback download must never land on a different name.
+    output_template = media_output_template(download_folder, url)
     ydl_opts = build_fast_yt_dlp_options(
         base_dir=get_base_dir(),
-        output_template=os.path.join(download_folder, '%(title)s.%(ext)s'),
+        output_template=output_template,
         audio_only=False,
     )
     # TikTok's CDN rejects downloads unless the referer points at tiktok.com.
@@ -3093,7 +3132,6 @@ def download_video_mp4(
 
     def _try_download(opts):
         if not python_can_download:
-            output_template = os.path.join(download_folder, '%(title)s.%(ext)s')
             _fallback_download_with_ytdlp_exe(
                 url,
                 output_template,
@@ -3182,8 +3220,8 @@ def download_video_mp4(
                 pass
 
         # First fallback: try to discover direct media URLs on the page and download them directly.
-        # Bound here (not inside either try) so both fallbacks below can use it.
-        output_template = os.path.join(download_folder, '%(title)s.%(ext)s')
+        # Uses output_template bound at the top of this function, so both
+        # fallbacks below keep the same (Instagram-safe) naming.
         try:
             status_callback("Primary download failed. Searching page for direct media URLs...", "#f39c12")
             try:

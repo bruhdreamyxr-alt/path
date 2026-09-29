@@ -477,5 +477,91 @@ class AeReencodeArgsTests(unittest.TestCase):
         self.assertGreaterEqual(downloader.AE_REENCODE_TIMEOUT, 3600)
 
 
+class InstagramDuplicateDownloadTests(unittest.TestCase):
+    """A second post from one Instagram creator must actually download.
+
+    yt-dlp titles captionless Instagram posts "Video by <username>", so
+    every post from one account produced the same filename, and yt-dlp's
+    never-overwrite-a-finished-video default turned the second download
+    into a silent no-op "success" (UI said Finished, no new file). Two
+    guards pin that shut: media_output_template embeds the unique post id
+    for Instagram, and both download paths force overwrites so an explicit
+    download always fetches bytes.
+    """
+
+    IG_URLS = [
+        "https://www.instagram.com/reel/Chunk8-jurw/",
+        "https://instagram.com/p/CDUMkliABpa/",
+        "https://www.instagram.com/stories/some.user/1234567890123/",
+        "https://www.instagram.com/tv/CabcDEF1234/",
+    ]
+    OTHER_URLS = [
+        "https://youtu.be/dQw4w9WgXcQ",
+        "https://www.tiktok.com/@user/video/123",
+        "https://vimeo.com/76979871",
+        "daft punk get lucky",
+        "",
+    ]
+
+    def test_instagram_template_includes_the_post_id(self):
+        for url in self.IG_URLS:
+            tmpl = downloader.media_output_template("C:/Downloads", url)
+            self.assertTrue(tmpl.endswith("%(title)s [%(id)s].%(ext)s"), url)
+
+    def test_other_sources_keep_the_plain_template(self):
+        for url in self.OTHER_URLS:
+            tmpl = downloader.media_output_template("C:/Downloads", url)
+            self.assertTrue(tmpl.endswith("%(title)s.%(ext)s"), url)
+            self.assertNotIn("[%(id)s]", tmpl, url)
+
+    def test_same_creator_two_posts_render_two_different_paths(self):
+        # yt-dlp gives both captionless reels the identical title; only the
+        # id can tell them apart, and the rendered paths must actually differ.
+        if downloader.yt_dlp is None:
+            self.skipTest("yt_dlp not installed")
+        tmpl = downloader.media_output_template("C:/Downloads", self.IG_URLS[0])
+        ydl = downloader.yt_dlp.YoutubeDL({"outtmpl": tmpl, "quiet": True})
+        title = "Video by clippedinandfree"
+        first = ydl.prepare_filename({"id": "REELAAAA", "title": title, "ext": "mp4"})
+        second = ydl.prepare_filename({"id": "REELBBBB", "title": title, "ext": "mp4"})
+        self.assertNotEqual(first, second)
+        self.assertIn("[REELAAAA]", first)
+        self.assertIn("[REELBBBB]", second)
+        # Re-downloading the SAME post still targets the same filename
+        # (overwrite in place, not a second copy).
+        again = ydl.prepare_filename({"id": "REELAAAA", "title": title, "ext": "mp4"})
+        self.assertEqual(first, again)
+
+    def test_both_download_paths_force_overwrites(self):
+        for audio_only in (False, True):
+            opts = downloader.build_fast_yt_dlp_options(
+                "C:/base", "C:/d/%(title)s.%(ext)s", audio_only=audio_only)
+            self.assertTrue(opts["overwrites"], f"audio_only={audio_only}")
+            # Forced overwrite must not cost .part resume support.
+            self.assertTrue(opts["continue"], f"audio_only={audio_only}")
+
+    def test_fallback_cli_forces_overwrites(self):
+        # The yt-dlp.exe fallback (packaged EXE path) needs the same
+        # behaviour, or the bug lives on wherever the module import fails.
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+
+        original = downloader._run_yt_dlp_exe
+        downloader._run_yt_dlp_exe = fake_run
+        try:
+            downloader._fallback_download_with_ytdlp_exe(
+                "https://example.com/watch",
+                "C:/d/%(title)s.%(ext)s",
+                False,
+                status_callback=lambda *args: None,
+            )
+        finally:
+            downloader._run_yt_dlp_exe = original
+        self.assertIn("--force-overwrites", captured["cmd"])
+        self.assertIn("--continue", captured["cmd"])
+
+
 if __name__ == "__main__":
     unittest.main()
