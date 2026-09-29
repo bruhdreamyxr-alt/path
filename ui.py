@@ -147,6 +147,35 @@ def _on_color(bg: str, *candidates: str) -> str:
     return best
 
 
+# Fragments that betray a machine-generated wall of text inside a dialog
+# message: yt-dlp tracebacks, argparse errors, aria2 and HTTP failures.
+_TRACEBACK_MARKERS = ("Traceback (most recent call last)", 'File "',
+                      "Error:", "ERROR:", "yt_dlp", "aria2", "HTTP Error",
+                      "usage:")
+
+
+def _split_headline(message, detail=None):
+    """Split dialog text into ``(headline, technical detail)``.
+
+    Call sites used to interpolate whole tracebacks straight into the message,
+    which a system message box would render as one unreadable clipped line.
+    Here the first line stays as the headline and everything technical below it
+    moves into the detail block, where it is capped on screen but always fully
+    copyable. A caller-supplied ``detail`` keeps its place in front of the
+    folded text, and friendly multi-line messages are left exactly as written.
+    """
+    message = "" if message is None else str(message).strip()
+    detail = "" if detail is None else str(detail).strip()
+    if not message:
+        return (detail or "(no message)"), ""
+    lines = message.splitlines()
+    tail = "\n".join(lines[1:])
+    if len(lines) > 4 and any(m in tail for m in _TRACEBACK_MARKERS):
+        return lines[0].strip(), (f"{detail}\n\n{tail.strip()}"
+                                  if detail else tail.strip())
+    return message, detail
+
+
 class UITheme:
     # Typography (base sizes; actual scaling handled by preferences)
     TITLE_FONT = _ui_font(24, "bold")
@@ -921,9 +950,14 @@ class UniversalAudioStudio(ctk.CTk):
         # Toast stack, unfocused-completion badge and view caches (declared
         # here so Pylance sees them before first use).
         self._active_toasts: list[Any] = []
+        self._toast_anim_id: Any = None
         self._unfocused_done: int = 0
         self._queue_refresh_pending: bool = False
         self._history_view_sig: Any = None
+        # Last URL/mode started, so a failed download's dialog can offer
+        # "Try again" without the user re-pasting the link.
+        self._last_dl_url: str = ""
+        self._last_dl_was_video: bool = False
 
         self.title("TuneLab")
         # Let packed widgets determine natural size; no fixed geometry.
@@ -1459,7 +1493,7 @@ class UniversalAudioStudio(ctk.CTk):
             return
         self._init_queue_manager()
         if not self._queue_manager:
-            messagebox.showerror("Queue Error", "Queue manager is not available.")
+            self._show_error_dialog("Queue Error", "Queue manager is not available.")
             return
         self._enqueue_urls(urls, is_video=False)
 
@@ -1477,7 +1511,7 @@ class UniversalAudioStudio(ctk.CTk):
         """Add URLs to the queue (supports bulk paste of multiple URLs)."""
         queue = self._queue_manager
         if queue is None:
-            messagebox.showerror("Queue Error", "Queue manager is not available.")
+            self._show_error_dialog("Queue Error", "Queue manager is not available.")
             return
 
         added = queue.add(urls, is_video=is_video)
@@ -1945,7 +1979,9 @@ class UniversalAudioStudio(ctk.CTk):
             else:
                 self._start_worker(self.download_mp3)
         except Exception as e:
-            messagebox.showerror("Re-download Error", f"Could not start re-download:\n{e}")
+            self._show_error_dialog("Re-download Error",
+                                    "Could not start the re-download.",
+                                    detail=str(e))
 
     @staticmethod
     def _open_file_command(filepath, mode="open", platform=None, is_dir=False):
@@ -1984,14 +2020,17 @@ class UniversalAudioStudio(ctk.CTk):
                 return
             except Exception:
                 continue
-        messagebox.showerror("Open Error", f"Could not open file:\n{filepath}")
+        self._show_error_dialog(
+            "Open Error",
+            "Could not open that file — it may have been moved or deleted.",
+            detail=filepath)
 
     def _clear_history(self):
         """Wipe the download history after confirmation."""
         if not self._queue_manager:
             self._init_queue_manager()
         if not self._queue_manager:
-            messagebox.showerror("Error", "Could not initialize download queue.")
+            self._show_error_dialog("Error", "Could not initialize download queue.")
             return
         if not messagebox.askyesno("Clear History", "Delete all download history?\n\nThis cannot be undone."):
             return
@@ -2000,10 +2039,183 @@ class UniversalAudioStudio(ctk.CTk):
             self._refresh_history_view()
             self.show_toast("History cleared", "success")
         except Exception as e:
-            messagebox.showerror("Error", f"Could not clear history:\n{e}")
+            self._show_error_dialog("Clear History", "Could not clear the history.",
+                                    detail=str(e))
 
     # -----------------
-    # Toast notifications (non-blocking替代 messagebox)
+    # Themed dialogs (replacement for the gray OS message boxes)
+    # -----------------
+    def _show_dialog(self, title: str, message: str, kind: str = "info",
+                     detail: str = None, action_label: str = None,
+                     action_cb=None):
+        """Themed stand-in for ``messagebox.show{info,error,warning}``.
+
+        The system boxes are gray OS chrome: they ignore the active palette,
+        squeeze a multi-line yt-dlp failure into one clipped line, and give no
+        way to copy the error text. This dialog uses the current theme, wraps
+        the message, shows technical detail in a separate muted block with a
+        Copy button, and can offer one secondary action (e.g. Try again).
+
+        Same ``(title, message)`` shape as messagebox so call sites stay
+        readable. Returns the Toplevel (mostly for tests); nothing blocks.
+        """
+        message, detail = _split_headline(message, detail)
+
+        pal = getattr(self, "_palette", {}) or {}
+        role = {"info": "accent", "success": "success",
+                "warning": "warning", "error": "danger"}.get(kind, "accent")
+        accent = pal.get(role, UITheme.COLOR_PRIMARY)
+        accent_hover = pal.get(role + "_hover", accent)
+        bg = pal.get("surface", UITheme.SURFACE_BG)
+        field_bg = pal.get("bg", "#1e1e24")
+        text = pal.get("text", "#ecf0f1")
+        sub = pal.get("sub", "#9baaab")
+        on_accent = _on_color(accent, "#ffffff", field_bg)
+        glyph = {"info": "ℹ", "success": "✓", "warning": "⚠",
+                 "error": "✗"}.get(kind, "ℹ")
+
+        dlg = ctk.CTkToplevel(self, fg_color=bg)
+        dlg.title(title)
+        dlg.resizable(False, False)
+        try:
+            dlg.transient(self)
+        except Exception:
+            pass
+
+        head = ctk.CTkFrame(dlg, fg_color="transparent")
+        head.pack(fill="x", padx=22, pady=(18, 4))
+        ctk.CTkLabel(head, text=glyph, font=UITheme.F(20, "bold"),
+                     text_color=accent, width=30).pack(side="left")
+        ctk.CTkLabel(head, text=title, font=UITheme.F(15, "bold"),
+                     text_color=text).pack(side="left")
+
+        body = ctk.CTkFrame(dlg, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=22, pady=(2, 2))
+        ctk.CTkLabel(body, text=str(message), font=UITheme.F(12),
+                     text_color=text, wraplength=430,
+                     justify="left").pack(anchor="w")
+
+        detail = "" if detail is None else str(detail).strip()
+        if detail:
+            lines = detail.splitlines()
+            # Cap what is displayed: a 40-line yt-dlp traceback would otherwise
+            # push the buttons off the screen. "Copy details" always copies the
+            # complete text, never the truncated preview.
+            if len(lines) > 8:
+                shown = "\n".join(lines[:8]) + \
+                    f"\n… plus {len(lines) - 8} more lines — use Copy details"
+            else:
+                shown = detail
+            box = ctk.CTkFrame(body, fg_color=field_bg,
+                               corner_radius=UITheme.RADIUS_SM)
+            box.pack(fill="x", anchor="w", pady=(12, 0))
+            ctk.CTkLabel(box, text=shown, font=UITheme.F(10), text_color=sub,
+                         wraplength=400, justify="left", anchor="w",
+                         takefocus=1).pack(side="left", fill="x", expand=True,
+                                           padx=12, pady=9)
+
+        row = ctk.CTkFrame(dlg, fg_color="transparent")
+        row.pack(fill="x", padx=22, pady=(14, 18))
+
+        def _close(_event=None):
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        ctk.CTkButton(row, text="OK", width=104, height=34, fg_color=accent,
+                      hover_color=accent_hover, text_color=on_accent,
+                      font=UITheme.F(12, "bold"),
+                      command=_close).pack(side="right")
+
+        if detail:
+            def _copy():
+                try:
+                    dlg.clipboard_clear()
+                    dlg.clipboard_append(detail)
+                except Exception:
+                    logger.exception("Could not copy dialog detail")
+
+            ctk.CTkButton(row, text="Copy details", width=112, height=34,
+                          fg_color="transparent", border_width=1,
+                          border_color=pal.get("hover", sub), text_color=sub,
+                          hover_color=pal.get("hover", bg),
+                          font=UITheme.F(11),
+                          command=_copy).pack(side="right", padx=(0, 10))
+
+        if action_label and action_cb:
+            def _run_action():
+                _close()
+                try:
+                    action_cb()
+                except Exception:
+                    logger.exception("Dialog action %r failed", action_label)
+
+            ctk.CTkButton(row, text=action_label, width=112, height=34,
+                          fg_color="transparent", border_width=1,
+                          border_color=accent, text_color=accent,
+                          hover_color=pal.get("hover", bg),
+                          font=UITheme.F(12, "bold"),
+                          command=_run_action).pack(side="right", padx=(0, 10))
+
+        def _on_key(event):
+            if event.keysym in ("Return", "KP_Enter", "Escape", "space"):
+                _close()
+                return "break"
+
+        for _key in ("<Return>", "<KP_Enter>", "<Escape>", "<space>"):
+            dlg.bind(_key, _on_key)
+        dlg.protocol("WM_DELETE_WINDOW", _close)
+
+        def _center():
+            # Center over the app window (not the screen) once the Toplevel has
+            # computed its size, so a long error lands where the user is
+            # already looking.
+            try:
+                dlg.update_idletasks()
+                w = max(dlg.winfo_reqwidth(), 400)
+                h = dlg.winfo_reqheight()
+                pw = max(self.winfo_width(), 640)
+                ph = max(self.winfo_height(), 420)
+                x = self.winfo_rootx() + max(0, (pw - w) // 2)
+                y = self.winfo_rooty() + max(0, (ph - h) // 3)
+                dlg.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception:
+                pass
+
+        def _grab():
+            # grab_set() only sticks once the window is viewable; doing it on a
+            # short delay avoids the blocking wait_visibility() call.
+            try:
+                dlg.grab_set()
+                dlg.focus_set()
+            except Exception:
+                pass
+
+        dlg.after(0, _center)
+        dlg.after(90, _grab)
+        return dlg
+
+    def _show_info_dialog(self, title: str, message: str, detail: str = None):
+        return self._show_dialog(title, message, "info", detail=detail)
+
+    def _show_success_dialog(self, title: str, message: str, detail: str = None):
+        return self._show_dialog(title, message, "success", detail=detail)
+
+    def _show_warning_dialog(self, title: str, message: str, detail: str = None):
+        return self._show_dialog(title, message, "warning", detail=detail)
+
+    def _show_error_dialog(self, title: str, message: str, detail: str = None,
+                           action_label: str = None, action_cb=None):
+        return self._show_dialog(title, message, "error", detail=detail,
+                                 action_label=action_label, action_cb=action_cb)
+
+    # -----------------
+    # Toast notifications (non-blocking)
     # -----------------
     def show_toast(self, message: str, toast_type: str = "info", duration: int = 3500):
         """Show a non-blocking toast notification at the bottom-right.
@@ -2045,34 +2257,105 @@ class UniversalAudioStudio(ctk.CTk):
             )
             lbl.pack(padx=16, pady=10)
 
+            # Start off the right edge and let _reposition_toasts glide it in;
+            # the rest of the stack slides up to make room in the same loop.
+            toast._toast_relx = 1.12 if getattr(self, "nav_anim_enabled", True) else 0.98
+            toast._toast_rely = 0.955
+            toast._toast_leaving = False
+
             self._active_toasts.append(toast)
             self._reposition_toasts()
 
-            def _dismiss():
+            def _dismiss(*_args):
+                if getattr(toast, "_toast_leaving", False):
+                    return
+                toast._toast_leaving = True
                 try:
-                    if toast in self._active_toasts:
-                        self._active_toasts.remove(toast)
-                    toast.destroy()
-                except Exception:
+                    self._active_toasts.remove(toast)
+                except ValueError:
                     pass
+                # Recount the slots first so the stack starts closing the gap
+                # while this toast is still flying off.
                 self._reposition_toasts()
+                if not getattr(self, "nav_anim_enabled", True):
+                    try:
+                        toast.destroy()
+                    except Exception:
+                        pass
+                    return
+                self._fly_off_toast(toast)
 
             # Click anywhere on the toast to dismiss it immediately.
-            toast.bind("<Button-1>", lambda e: _dismiss())
-            lbl.bind("<Button-1>", lambda e: _dismiss())
+            toast.bind("<Button-1>", _dismiss)
+            lbl.bind("<Button-1>", _dismiss)
 
             # Auto-dismiss after duration
             self.after(duration, _dismiss)
         except Exception:
             pass
 
-    def _reposition_toasts(self, _event=None):
-        """Keep the toast stack bottom-anchored and evenly spaced."""
-        for i, t in enumerate(self._active_toasts):
+    def _fly_off_toast(self, toast, steps: int = 7):
+        """Glide a dismissed toast off the right edge, then destroy it."""
+        def step(i: int):
             try:
-                t.place(relx=0.98, rely=0.955 - i * 0.065, anchor="se")
+                if not toast.winfo_exists():
+                    return
+                t = min(1.0, i / steps)
+                eased = 1 - (1 - t) * (1 - t)   # ease-out, like the nav indicator
+                toast.place(relx=0.98 + 0.16 * eased,
+                            rely=getattr(toast, "_toast_rely", 0.955),
+                            anchor="se")
+                if i < steps:
+                    self.after(16, lambda: step(i + 1))
+                else:
+                    toast.destroy()
+            except Exception:
+                try:
+                    toast.destroy()
+                except Exception:
+                    pass
+
+        step(0)
+
+    def _reposition_toasts(self, _event=None):
+        """Glide every toast toward its slot in the bottom-right stack.
+
+        Positions are eased instead of snapped: a new toast arrives from the
+        right edge and the stack below slides up to close the gap, so the pile
+        never blinks into place. One loop drives every toast; its trailing
+        after() is cancelled and restarted whenever the stack changes.
+        """
+        self._active_toasts = [t for t in self._active_toasts if t.winfo_exists()]
+        if not self._active_toasts:
+            return
+        animate = bool(getattr(self, "nav_anim_enabled", True))
+        moving = False
+        for i, t in enumerate(self._active_toasts):
+            target_x, target_y = 0.98, 0.955 - i * 0.065
+            cur_x = getattr(t, "_toast_relx", target_x)
+            cur_y = getattr(t, "_toast_rely", target_y)
+            if animate:
+                new_x = cur_x + (target_x - cur_x) * 0.35
+                new_y = cur_y + (target_y - cur_y) * 0.35
+                if abs(target_x - new_x) > 0.001 or abs(target_y - new_y) > 0.001:
+                    moving = True
+                else:
+                    new_x, new_y = target_x, target_y
+            else:
+                new_x, new_y = target_x, target_y
+            t._toast_relx, t._toast_rely = new_x, new_y
+            try:
+                t.place(relx=new_x, rely=new_y, anchor="se")
             except Exception:
                 pass
+        if moving:
+            pending = getattr(self, "_toast_anim_id", None)
+            if pending:
+                try:
+                    self.after_cancel(pending)
+                except Exception:
+                    pass
+            self._toast_anim_id = self.after(28, self._reposition_toasts)
 
     def update_speed_label(self, speed_text: str):
         """Update the speed/ETA label below the progress bar."""
@@ -2081,13 +2364,13 @@ class UniversalAudioStudio(ctk.CTk):
     def _open_tag_editor(self):
         filepath = self._last_downloaded_file
         if not filepath or not os.path.exists(filepath):
-            messagebox.showwarning("No File", "No downloaded file available to edit.")
+            self._show_warning_dialog("No File", "No downloaded file available to edit.")
             return
         try:
             from tag_editor import open_tag_editor
             open_tag_editor(self, filepath, on_save=self._on_tags_saved)
         except Exception as e:
-            messagebox.showerror("Tag Editor", f"Could not open tag editor: {e}")
+            self._show_error_dialog("Tag Editor", f"Could not open tag editor: {e}")
 
     def _on_tags_saved(self):
         self.show_toast("Tags updated successfully.", "success")
@@ -2195,16 +2478,26 @@ class UniversalAudioStudio(ctk.CTk):
                 msg = downloader.update_ytdlp(
                     status_callback=lambda text, color: self.after(0, lambda: self.ytdlp_ver_lbl.configure(text=text))
                 )
+                # The pip output is long and technical: keep a short headline in
+                # the body and push the raw log into the copyable detail box.
                 if "already up to date" in msg.lower():
-                    self.after(0, lambda: messagebox.showinfo("yt-dlp Updater", f"yt-dlp is already up to date!\n\n{msg}"))
+                    self.after(0, lambda: self._show_info_dialog(
+                        "yt-dlp Updater", "yt-dlp is already up to date.",
+                        detail=msg))
                 elif "updated" in msg.lower() and "fail" not in msg.lower():
-                    self.after(0, lambda: messagebox.showinfo("yt-dlp Updater", f"Update successful!\n\n{msg}\n\nRestart the app to use the new version."))
+                    self.after(0, lambda: self._show_success_dialog(
+                        "yt-dlp Updater",
+                        "Update successful. Restart the app to use the new version.",
+                        detail=msg))
                 else:
-                    self.after(0, lambda: messagebox.showinfo("yt-dlp Updater", msg))
+                    self.after(0, lambda: self._show_info_dialog(
+                        "yt-dlp Updater", "The updater finished — check the details.",
+                        detail=msg))
                 self.after(0, lambda: self._ytdlp_update_check_worker())
             except Exception as e:
                 logger.exception("yt-dlp update failed")
-                self.after(0, lambda: messagebox.showerror("Update Error", f"Failed to update yt-dlp:\n{e}"))
+                self.after(0, lambda: self._show_error_dialog(
+                    "Update Error", "Failed to update yt-dlp.", detail=str(e)))
             finally:
                 self.after(0, lambda: self.ytdlp_update_btn.configure(state="normal", text="⮔ Update yt-dlp"))
         self._start_worker(worker)
@@ -2215,7 +2508,7 @@ class UniversalAudioStudio(ctk.CTk):
         from version import __version__ as local_ver
 
         if not updater.is_frozen():
-            messagebox.showinfo(
+            self._show_info_dialog(
                 "Update Unavailable",
                 "Self-update only works in the packaged app.\n\n"
                 "You are running from source (python ui.py), so there is no\n"
@@ -2290,7 +2583,7 @@ class UniversalAudioStudio(ctk.CTk):
             new_exe_path = updater.download_update(dl_url)
             if not new_exe_path:
                 self.after(0, lambda: self.update_dl_status("Download failed. Please try again.", "#e74c3c"))
-                self.after(0, lambda: messagebox.showerror("Update Error", "Failed to download the update."))
+                self.after(0, lambda: self._show_error_dialog("Update Error", "Failed to download the update."))
                 self.after(0, lambda: self.app_update_btn.configure(state="normal", text=f"↻ Update to v{remote_ver}"))
                 return
 
@@ -2308,7 +2601,7 @@ class UniversalAudioStudio(ctk.CTk):
             )
 
             if not launched:
-                self.after(0, lambda: messagebox.showerror(
+                self.after(0, lambda: self._show_error_dialog(
                     "Update Not Installed",
                     "Could not start the updater.\n\n"
                     "Either updater_cli.exe is missing, or admin permission "
@@ -2365,7 +2658,7 @@ class UniversalAudioStudio(ctk.CTk):
             # plainly instead of offering a download that does not exist, and
             # never let it turn into a recurring prompt.
             self.update_dl_status(f"Up to date (v{local_ver}).", "#27ae60")
-            messagebox.showinfo(
+            self._show_info_dialog(
                 "No Mac Update",
                 f"Version {remote_ver} has been released, but it contains no "
                 f"macOS build.\n\nYou already have the newest Mac version "
@@ -2399,7 +2692,7 @@ class UniversalAudioStudio(ctk.CTk):
                 self.update_dl_status(f"Opened the download for v{remote_ver}.", "#27ae60")
             except Exception as e:
                 logger.warning("Could not open a browser: %s", e)
-                messagebox.showinfo("Update Available", f"Download it here:\n\n{target}")
+                self._show_info_dialog("Update Available", f"Download it here:\n\n{target}")
 
     def _check_updates_on_startup(self):
         """Quiet startup auto-check: only prompts if a newer version exists.
@@ -2493,6 +2786,7 @@ class UniversalAudioStudio(ctk.CTk):
         url = self.url_entry.get().strip()
         if not url:
             return
+        self._last_dl_url = url
         self._last_dl_was_video = False
         self._last_downloaded_file = None
         self.set_download_buttons_state(False)
@@ -2523,6 +2817,7 @@ class UniversalAudioStudio(ctk.CTk):
         url = self.url_entry.get().strip()
         if not url:
             return
+        self._last_dl_url = url
         self._last_dl_was_video = True
         self._last_downloaded_file = None
         self.set_download_buttons_state(False)
@@ -2604,7 +2899,7 @@ class UniversalAudioStudio(ctk.CTk):
             self.show_toast("Please enter a URL to preview.", "warning")
             return
         if not downloader.can_resolve_preview():
-            messagebox.showerror(
+            self._show_error_dialog(
                 "Dependency Missing",
                 "Neither the 'yt_dlp' Python module nor a local 'yt-dlp.exe' was found.\n\n"
                 "Install yt-dlp (python -m pip install yt-dlp) or run a download first to "
@@ -2660,7 +2955,7 @@ class UniversalAudioStudio(ctk.CTk):
                 _sd.wait()
             except Exception as e:
                 logger.exception("Audio preview failed")
-                self.after(0, lambda err=e: messagebox.showerror('Preview Error', f'Audio preview failed:\n{err}'))
+                self.after(0, lambda err=e: self._show_error_dialog('Preview Error', f'Audio preview failed:\n{err}'))
             finally:
                 self._preview_via_sd = False
                 self.after(0, lambda: self.btn_preview_audio.configure(state='normal'))
@@ -2697,7 +2992,7 @@ class UniversalAudioStudio(ctk.CTk):
             self.show_toast("Please enter a URL to preview.", "warning")
             return
         if not downloader.can_resolve_preview():
-            messagebox.showerror(
+            self._show_error_dialog(
                 "Dependency Missing",
                 "Neither the 'yt_dlp' Python module nor a local 'yt-dlp.exe' was found.\n\n"
                 "Install yt-dlp (python -m pip install yt-dlp) or run a download first to "
@@ -2750,7 +3045,12 @@ class UniversalAudioStudio(ctk.CTk):
                             vlc_player.play()
 
                         except Exception as e:
-                            messagebox.showerror('Preview Error', f'Embedded video preview failed:\n{e}')
+                            # start_vlc itself was dispatched with after(0, ...),
+                            # so this is on the main thread and can use the themed
+                            # dialog like every other message.
+                            self._show_error_dialog(
+                                'Preview Error',
+                                f'Embedded video preview failed:\n{e}')
 
                     self.after(0, start_vlc)
                 else:
@@ -2775,7 +3075,7 @@ class UniversalAudioStudio(ctk.CTk):
 
             except Exception as e:
                 err = e
-                self.after(0, lambda err=err: messagebox.showerror('Preview Error', f'Video preview failed:\n{err}'))
+                self.after(0, lambda err=err: self._show_error_dialog('Preview Error', f'Video preview failed:\n{err}'))
             finally:
                 self.after(0, lambda: self.btn_preview_video.configure(state='normal'))
                 self.after(0, lambda: self.btn_stop_video.configure(state='disabled'))
@@ -2899,11 +3199,19 @@ class UniversalAudioStudio(ctk.CTk):
             self.update_dl_status("Cancelled", "#f39c12")
             self.progress_bar.set(0)
             self.update_dl_detail("", "#95a5a6")
+            self.show_toast("Download cancelled", "warning")
         elif err:
             cleaned_err = downloader._strip_ansi(err) if hasattr(downloader, '_strip_ansi') else str(err)
             self.update_dl_status("Failed", "#e74c3c")
-            messagebox.showerror("Download Error", cleaned_err)
             self.progress_bar.set(0)
+            # yt-dlp fails with a wall of text. Lead with the first line so the
+            # dialog stays readable, keep the full log copyable, and offer the
+            # retry instead of making the user re-paste the link.
+            headline = next((ln.strip() for ln in cleaned_err.splitlines()
+                             if ln.strip()), "The download failed.")
+            self._show_error_dialog(
+                "Download Failed", headline, detail=cleaned_err,
+                action_label="Try again", action_cb=self._retry_last_download)
         else:
             self.update_dl_status("Finished!", "#2ecc71")
             self.progress_bar.set(1.0)
@@ -2938,9 +3246,38 @@ class UniversalAudioStudio(ctk.CTk):
             # Save to history
             self._save_direct_download_to_history(folder, err,
                 filepath=self._last_downloaded_file, is_video=self._last_dl_was_video)
+            # Non-blocking cue: the file manager just took focus, so a modal
+            # "Success!" box would be noise — the toast slides in instead.
+            name = os.path.basename(self._last_downloaded_file or "") or "Download complete"
+            self.show_toast(f"Saved  {name}", "success")
         self.title("TuneLab")
         self._last_title_pct = None
         self.set_download_buttons_state(True)
+
+    def _retry_last_download(self):
+        """Re-run the last download with the same URL and audio/video mode.
+
+        Wired to the "Try again" button of the failure dialog. Falls back to the
+        remembered URL when the entry has been edited or cleared since.
+        """
+        try:
+            url = (self.url_entry.get() or "").strip() or self._last_dl_url
+        except Exception:
+            url = self._last_dl_url
+        if not url:
+            self.show_toast("Nothing to retry — paste a link first", "warning")
+            return
+        self.show_frame("downloader")
+        try:
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, url)
+            self._sync_clear_btn()
+        except Exception:
+            pass
+        if getattr(self, "_last_dl_was_video", False):
+            self._start_worker(self.download_mp4)
+        else:
+            self._start_worker(self.download_mp3)
 
     @staticmethod
     def _newest_media_file(folder):
@@ -3226,11 +3563,11 @@ class UniversalAudioStudio(ctk.CTk):
                         "  - macOS:   brew install aria2\n\n"
                         "Until then, leave this disabled."
                     )
-                    messagebox.showinfo("Performance", _msg)
+                    self._show_info_dialog("Performance", _msg)
             else:
                 self.show_toast("Performance settings applied (aria2 disabled).", "success")
         except Exception as e:
-            messagebox.showerror("Performance Error", f"Failed to apply settings:\n{e}")
+            self._show_error_dialog("Performance Error", f"Failed to apply settings:\n{e}")
 
     def apply_soundcloud_pref(self):
         """Persist the 'try SoundCloud direct first' preference for MP3 downloads."""
@@ -3935,7 +4272,7 @@ class UniversalAudioStudio(ctk.CTk):
 
     def load_background_gif(self):
         if Image is None:
-            messagebox.showerror("Dependency Missing", "Pillow is required to load GIF backgrounds. Install with: pip install pillow")
+            self._show_error_dialog("Dependency Missing", "Pillow is required to load GIF backgrounds. Install with: pip install pillow")
             return
 
         gif_path = filedialog.askopenfilename(title="Select Animated GIF", filetypes=[("GIF Animation", "*.gif")])
@@ -3945,7 +4282,7 @@ class UniversalAudioStudio(ctk.CTk):
         try:
             pil_img = Image.open(gif_path)
         except Exception as e:
-            messagebox.showerror("Background Error", f"Could not open GIF:\n{e}")
+            self._show_error_dialog("Background Error", f"Could not open GIF:\n{e}")
             return
 
         try:
@@ -3964,11 +4301,11 @@ class UniversalAudioStudio(ctk.CTk):
                     ctk_img = ctk.CTkImage(light_image=f, dark_image=f, size=size)
                     frames.append(ctk_img)
         except Exception as e:
-            messagebox.showerror("Background Error", f"Failed processing GIF frames:\n{e}")
+            self._show_error_dialog("Background Error", f"Failed processing GIF frames:\n{e}")
             return
 
         if not frames:
-            messagebox.showerror("Background Error", "Could not load frames from the selected GIF.")
+            self._show_error_dialog("Background Error", "Could not load frames from the selected GIF.")
             return
 
         self.bg_frames = frames
@@ -4038,7 +4375,7 @@ class UniversalAudioStudio(ctk.CTk):
                 self.after(0, lambda: self.show_toast(msg, "success", duration=6000))
                 self.after(0, lambda: self.update_dl_status("Cache cleared.", "#2ecc71"))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Cache Clear Error", str(e)))
+                self.after(0, lambda: self._show_error_dialog("Cache Clear Error", str(e)))
             finally:
                 self.after(0, lambda: self.clear_cache_btn.configure(state="normal"))
 
@@ -4061,7 +4398,7 @@ class UniversalAudioStudio(ctk.CTk):
             self.show_toast("Please load an audio file first.", "warning")
             return
         if _lazy_import_sounddevice() is None:
-            messagebox.showerror("Module Missing", "sounddevice package missing.")
+            self._show_error_dialog("Module Missing", "sounddevice package missing.")
             return
         self.btn_play.configure(state="disabled")
         self.btn_stop.configure(state="normal")
@@ -4088,10 +4425,10 @@ class UniversalAudioStudio(ctk.CTk):
             else:
                 self.after(0, self.reset_studio_buttons)
         except RuntimeError as e:
-            self.after(0, lambda err=e: messagebox.showerror("Missing Dependency", str(err)))
+            self.after(0, lambda err=e: self._show_error_dialog("Missing Dependency", str(err)))
             self.after(0, self.reset_studio_buttons)
         except Exception as e:
-            self.after(0, lambda err=e: messagebox.showerror("Playback Error", f"Could not play preview:\n{err}"))
+            self.after(0, lambda err=e: self._show_error_dialog("Playback Error", f"Could not play preview:\n{err}"))
             self.after(0, self.reset_studio_buttons)
 
     def stop_preview(self):
@@ -4112,7 +4449,7 @@ class UniversalAudioStudio(ctk.CTk):
 
     def export_studio_track(self):
         if not self.studio_file_path:
-            messagebox.showwarning("File Missing", "Please select an audio file first.")
+            self._show_warning_dialog("File Missing", "Please select an audio file first.")
             return
 
         original_name = os.path.splitext(os.path.basename(self.studio_file_path))[0]
@@ -4146,7 +4483,7 @@ class UniversalAudioStudio(ctk.CTk):
                     try:
                         import soundfile as sf
                     except Exception:
-                        self.after(0, lambda: messagebox.showerror(
+                        self.after(0, lambda: self._show_error_dialog(
                             "Missing Dependency",
                             "The required package 'soundfile' is not installed.\n\n"
                             "Install it in your environment with:\n    python -m pip install soundfile\n\n"
@@ -4182,13 +4519,18 @@ class UniversalAudioStudio(ctk.CTk):
                             f"ffmpeg failed with exit code {completed.returncode}."
                         )
                     self.update_studio_progress(1.0)
-                    self.after(0, lambda: messagebox.showinfo("Success", "Audio exported successfully!"))
+                    self.after(0, lambda: self._show_success_dialog(
+                        "Export complete",
+                        f"Saved {os.path.basename(dest)}",
+                        detail=dest))
                 else:
                     self.update_studio_progress(0.0)
-                    self.after(0, lambda: messagebox.showerror("Error", "Could not process audio."))
+                    self.after(0, lambda: self._show_error_dialog(
+                        "Export Failed", "The audio could not be processed."))
             except Exception as e:
                 self.update_studio_progress(0.0)
-                self.after(0, lambda err=e: messagebox.showerror("Export Interrupted", f"Failed: {err}"))
+                self.after(0, lambda err=e: self._show_error_dialog(
+                    "Export Interrupted", "The export failed.", detail=str(err)))
             finally:
                 if os.path.exists(temp_wav):
                     try:

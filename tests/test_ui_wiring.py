@@ -520,5 +520,239 @@ class OnColorPickerTests(unittest.TestCase):
             self._contrast("#ffffff", "#000000"), 21.0, delta=0.1)
 
 
+class ThemedDialogTests(unittest.TestCase):
+    """Modal OS message boxes are replaced by themed, non-blocking dialogs.
+
+    The system boxes were gray OS chrome that ignored the active theme,
+    swallowed long yt-dlp tracebacks, and blocked the thread that raised
+    them. Each guard below pins one of those regressions.
+    """
+
+    def test_the_dialog_family_exists(self):
+        for name in ("_show_dialog", "_show_info_dialog", "_show_success_dialog",
+                     "_show_warning_dialog", "_show_error_dialog"):
+            _method_source(name)          # asserts the method is defined
+
+    def test_dialog_is_a_themed_toplevel_and_never_blocks_a_thread(self):
+        body = _method_source("_show_dialog")
+        self.assertIn("ctk.CTkToplevel", body)
+        self.assertIn("transient(self)", body)      # stays with the app window
+        # Modality must not cost a blocked interpreter: grab_set() is deferred
+        # on a timer instead of being preceded by a blocking wait, and the
+        # method hands the Toplevel back to the caller immediately.
+        self.assertNotIn("dlg.wait_window", body)
+        self.assertNotIn("dlg.wait_visibility", body)
+        self.assertIn("dlg.after(90, _grab)", body)
+        self.assertEqual(body.rstrip().rsplit("\n", 1)[-1].strip(), "return dlg")
+
+    def test_technical_detail_is_capped_on_screen_but_not_when_copied(self):
+        body = _method_source("_show_dialog")
+        self.assertIn("Copy details", body)
+        self.assertIn("clipboard_append(detail)", body)   # full text, not preview
+        self.assertIn("len(lines) > 8", body)             # preview is capped
+        self.assertIn('if detail:', body)                 # block only when needed
+
+    def test_the_dialog_runs_its_text_through_the_splitter(self):
+        # Headline tidying lives in ui._split_headline (unit-tested on its own);
+        # the dialog must actually use it before laying anything out.
+        body = _method_source("_show_dialog")
+        self.assertIn("message, detail = _split_headline(message, detail)", body)
+        self.assertLess(body.index("_split_headline(message, detail)"),
+                        body.index("ctk.CTkToplevel"))
+
+    def test_action_button_sits_left_of_ok(self):
+        self.assertIn("action_label", _method_source("_show_error_dialog"))
+        body = _method_source("_show_dialog")
+        # Every button packs side="right", which lays out right-to-left: the
+        # later a button is packed, the further left it lands.
+        ok = body.index('text="OK"')
+        copy = body.index('text="Copy details"')
+        action = body.index("if action_label and action_cb:")
+        self.assertLess(ok, copy)
+        self.assertLess(copy, action)
+
+    def test_action_callback_survives_being_wrapped(self):
+        # "Try again" must still fire after the dialog has torn itself down.
+        body = _method_source("_show_dialog")
+        close = body.index("def _run_action():")
+        self.assertIn("_close()", body[close:close + 120])
+        self.assertIn("action_cb()", body[close:close + 200])
+
+    def test_failure_call_sites_route_to_the_dialog(self):
+        src = _source()
+        self.assertIn('"Download Failed", headline,', src)
+        self.assertIn('action_label="Try again", action_cb=self._retry_last_download',
+                      src)
+
+    def test_routine_modal_info_boxes_are_gone(self):
+        src = _source()
+        for gone in ('messagebox.showinfo("Success"',
+                     'messagebox.showinfo("Complete"',
+                     'messagebox.showinfo("Queue"',
+                     'messagebox.showwarning("Queue"',
+                     'messagebox.showerror("Download Failed"'):
+            self.assertNotIn(gone, src)
+
+
+class SplitHeadlineTests(unittest.TestCase):
+    """``_split_headline`` keeps a dialog headline readable, without losing logs.
+
+    Call sites used to interpolate whole yt-dlp tracebacks into the message, and
+    a system message box rendered that as one clipped, uncopyable line. The
+    splitter keeps line one and moves the technical tail into the detail block.
+    """
+
+    TRACE = ("Traceback (most recent call last):\n"
+             '  File "ui.py", line 12, in download_mp3\n'
+             "    yt_dlp.main(argv)\n"
+             "yt_dlp.utils.DownloadError: ERROR: HTTP Error 403: Forbidden\n"
+             "(forwarded from aria2)")
+
+    def setUp(self):
+        from ui import _split_headline
+        self.split = _split_headline
+
+    def test_a_traceback_message_keeps_only_its_first_line(self):
+        head, detail = self.split("Download failed.\n" + self.TRACE)
+        self.assertEqual(head, "Download failed.")
+        self.assertTrue(detail.startswith("Traceback"))
+        self.assertIn("HTTP Error 403", detail)
+
+    def test_caller_detail_stays_in_front_of_the_folded_trace(self):
+        head, detail = self.split("Download failed.\n" + self.TRACE,
+                                  detail="aria2 exited with code 1")
+        self.assertEqual(head, "Download failed.")
+        self.assertTrue(detail.startswith("aria2 exited with code 1"))
+        self.assertIn("Traceback (most recent call last)", detail)
+
+    def test_friendly_multi_line_copy_is_left_alone(self):
+        # Human-written lines are not technical detail: demoting them would
+        # hide the message behind a block most users never open.
+        friendly = "All done.\nSaved 3 files.\nInto your Music folder.\nSee you soon.\nBye."
+        self.assertEqual(self.split(friendly), (friendly, ""))
+
+    def test_short_technical_messages_stay_in_the_headline(self):
+        short = "Failed.\nERROR: nope\nmore\nlines"
+        self.assertEqual(len(short.splitlines()), 4)     # under the fold size
+        self.assertEqual(self.split(short), (short, ""))
+
+    def test_an_empty_message_falls_back_to_the_detail(self):
+        self.assertEqual(self.split("", "Only a detail."),
+                         ("Only a detail.", ""))
+        self.assertEqual(self.split(None, None), ("(no message)", ""))
+        self.assertEqual(self.split("   ", None), ("(no message)", ""))
+
+    def test_non_string_input_is_tolerated(self):
+        self.assertEqual(self.split(None, 404), ("404", ""))
+        self.assertEqual(self.split(500), ("500", ""))
+
+
+class MessageboxRetirementTests(unittest.TestCase):
+    """What is left of tkinter.messagebox, and why.
+
+    ask* confirmations stay: the themed dialog is deliberately fire-and-forget
+    and cannot answer a question back to a caller. The single surviving show*
+    is the "customtkinter is missing" path, which runs before any themed window
+    could possibly exist.
+    """
+
+    SHOW_CALLS = re.compile(r"\bmessagebox\.(show\w*)\(")
+    ASK_CALLS = re.compile(r"\bmessagebox\.(ask\w*)\(")
+
+    def test_no_informational_or_warning_boxes_are_left(self):
+        self.assertEqual(self.SHOW_CALLS.findall(_source()), ["showerror"])
+
+    def test_confirmations_are_still_synchronous(self):
+        self.assertEqual(len(self.ASK_CALLS.findall(_source())), 6)
+
+    def test_worker_thread_dialogs_are_marshalled(self):
+        # A Toplevel built on a worker thread is a Tk threading crash, so the
+        # dialog calls that live inside worker bodies go through after().
+        src = _source()
+        for needle in ('lambda: self._show_error_dialog("Cache Clear Error"',
+                       'lambda err=e: self._show_error_dialog('):
+            self.assertIn(needle, src)
+            self.assertIn("self.after(0, ", src[max(0, src.index(needle) - 40):src.index(needle)])
+
+
+class TechnicalDetailTests(unittest.TestCase):
+    """Long failures must not be allowed to dictate the dialog's size."""
+
+    def test_retry_method_reuses_the_last_url(self):
+        body = _method_source("_retry_last_download")
+        self.assertIn("_last_dl_url", body)
+        self.assertIn('show_frame("downloader")', body)
+        self.assertIn("Nothing to retry", body)   # empty-state, not a dialog
+
+    def test_export_and_download_failures_keep_the_raw_log_copyable(self):
+        src = _source()
+        # Headline for the box, untouched error text for the detail block.
+        self.assertIn("detail=cleaned_err", src)
+        self.assertIn('detail=str(err)', src)
+
+
+class ToastMotionTests(unittest.TestCase):
+    """Toasts glide in from off-edge, the stack re-flows as they arrive, and
+    a dismissed toast flies off before it is destroyed."""
+
+    def test_the_app_owns_the_stack_loop_token(self):
+        self.assertIn("self._toast_anim_id", _method_source("__init__"))
+
+    def test_a_new_toast_starts_off_the_edge_and_is_glided_in(self):
+        body = _method_source("show_toast")
+        # relx 1.12 is past the right edge (resting slot is 0.98); with motion
+        # off it is placed straight on its slot.
+        self.assertIn("toast._toast_relx = 1.12", body)
+        self.assertIn("nav_anim_enabled", body)
+        self.assertIn("self._reposition_toasts()", body)
+
+    def test_the_stack_closes_the_gap_while_the_toast_is_still_leaving(self):
+        body = _method_source("show_toast")
+        dismiss = body[body.index("def _dismiss("):]
+        self.assertLess(dismiss.index("self._active_toasts.remove(toast)"),
+                        dismiss.index("self._reposition_toasts()"))
+        self.assertLess(dismiss.index("self._reposition_toasts()"),
+                        dismiss.index("self._fly_off_toast(toast)"))
+        # Double dismissal (click then timer) must not animate twice.
+        self.assertIn("_toast_leaving", dismiss)
+
+    def test_fly_off_moves_right_past_the_resting_slot_then_destroys(self):
+        body = _method_source("_fly_off_toast")
+        self.assertIn("0.98 + 0.16", body)      # rightward, never leftward
+        self.assertIn("1 - (1 - t) * (1 - t)", body)   # ease-out, like the nav
+        self.assertLess(body.index("self.after(16"), body.index("toast.destroy()"))
+
+    def test_repositioning_eases_toward_relative_slots(self):
+        body = _method_source("_reposition_toasts")
+        self.assertIn("0.955 - i * 0.065", body)   # relative: survives resizes
+        self.assertIn("* 0.35", body)              # eased, not snapped
+        self.assertIn("anchor=", body)
+
+    def test_the_loop_restarts_itself_only_while_something_is_moving(self):
+        body = _method_source("_reposition_toasts")
+        self.assertIn("moving = False", body)
+        self.assertIn("if moving:", body)
+        self.assertLess(body.index("if moving:"),
+                        body.index("self.after_cancel(pending)"))
+        self.assertIn("_toast_anim_id = self.after(28, self._reposition_toasts)", body)
+
+    def test_motion_can_be_turned_off_entirely(self):
+        # Reduced-motion users must get the static placement, not a shorter
+        # animation: show_toast snaps to 0.98 and skips the fly-off.
+        show = _method_source("show_toast")
+        self.assertIn("else 0.98", show)
+        reflow = _method_source("_reposition_toasts")
+        self.assertIn("animate = bool(getattr(self, \"nav_anim_enabled\", True))", reflow)
+
+    def test_toasts_are_only_built_from_the_main_loop(self):
+        # show_toast() places widgets; a worker reaches it through after().
+        src = _source()
+        for line in src.splitlines():
+            if "_finalize_download(" in line and "def " not in line:
+                self.assertIn("self.after(", line,
+                              "worker calls _finalize_download directly")
+        self.assertIn("self.show_toast(f\"Saved", _source())
+
+
 if __name__ == "__main__":
     unittest.main()
