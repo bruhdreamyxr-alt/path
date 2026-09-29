@@ -147,6 +147,28 @@ def _on_color(bg: str, *candidates: str) -> str:
     return best
 
 
+def _mix(a: str, b: str, t: float) -> str:
+    """Blend two '#rrggbb' colors; ``t``=0 keeps ``a``, ``t``=1 gives ``b``.
+
+    CustomTkinter surfaces have no alpha channel, so a "translucent accent"
+    (a selected nav chip, a logo tile) is built by mixing the accent into the
+    surface it sits on. Deriving it from the palette keeps those tints correct
+    on light themes too, where a fixed dark overlay would be invisible.
+    """
+    def rgb(c):
+        c = (c or "#000000").strip().lstrip("#")
+        if len(c) == 3:
+            c = "".join(ch * 2 for ch in c)
+        try:
+            return (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
+        except ValueError:
+            return (0, 0, 0)
+
+    ca, cb = rgb(a), rgb(b)
+    return "#%02x%02x%02x" % tuple(
+        int(round(ca[i] + (cb[i] - ca[i]) * t)) for i in range(3))
+
+
 # Fragments that betray a machine-generated wall of text inside a dialog
 # message: yt-dlp tracebacks, argparse errors, aria2 and HTTP failures.
 _TRACEBACK_MARKERS = ("Traceback (most recent call last)", 'File "',
@@ -229,9 +251,27 @@ class UITheme:
     # rectangle, and rounded corners stop reading as rounded.
     BORDER_W = 1
 
-    # Collapsible sidebar dimensions
-    SB_W_EXPANDED = 176
-    SB_W_COLLAPSED = 54
+    # Collapsible rail geometry. Nav rows are placed once at fixed pixel
+    # coordinates inside the rail and never re-laid out: Tk clips child
+    # windows to their parent, so narrowing the rail wipes the labels out of
+    # view. That is what removed the old "pop" - the rail used to swap every
+    # row's text, anchor, font size and width mid-slide, so items jumped.
+    # SB_W_COLLAPSED is exactly pad + icon column + pad, which keeps the icon
+    # column centred in the collapsed rail instead of drifting left.
+    SB_PAD_X = 10
+    SB_ICON_W = 30
+    SB_TEXT_X = 44        # row-local: inside a chip (which is itself at SB_PAD_X)
+    SB_LABEL_X = SB_PAD_X + SB_TEXT_X   # rail-local x of a row's label
+    # ^ Anything placed directly in the rail (the wordmark, the group headers)
+    #   must start at SB_LABEL_X, not at SB_TEXT_X: the collapsed rail is only
+    #   SB_W_COLLAPSED wide, so text starting before that is sliced by its own
+    #   clip and leaves a half-glyph poking out beside the icon column.
+    SB_HINT_X = 150       # shortcut digit / live badge slot (clipped too)
+    SB_ROW_H = 38
+    SB_ROW_GAP = 4
+    SB_ROW_W = 180
+    SB_W_EXPANDED = SB_PAD_X + SB_ROW_W + SB_PAD_X      # 200
+    SB_W_COLLAPSED = SB_PAD_X + SB_ICON_W + SB_PAD_X    # 50
 
 
 # ==========================================================
@@ -669,6 +709,9 @@ class UniversalAudioStudio(ctk.CTk):
             "nav_animation_enabled": True,
             "nav_animation_speed": 12,
             "sidebar_collapsed": False,
+            # Off by default: a rail that throws itself open every time the
+            # pointer crosses it steals attention from whatever you are doing.
+            "sidebar_peek_on_hover": False,
             "color_theme": "TuneLab Dark",
             "soundcloud_direct_first": True,
             "save_folder": "",
@@ -995,10 +1038,27 @@ class UniversalAudioStudio(ctk.CTk):
         self.studio_file_path = None
 
         # -----------------
-        # Collapsible sidebar navigation (slides in/out)
+        # Collapsible navigation rail (slides by clipping, never re-lays out)
         # -----------------
         self._sidebar_expanded = not bool(self._prefs.get("sidebar_collapsed", False))
+        self._sb_shown = self._sidebar_expanded   # state the pixels currently show
         self._sb_anim_after_id = None
+        # Hover / press / peek state. Everything visual is derived from these
+        # three in _repaint_nav_rows, so no handler has to guess what a row
+        # should look like.
+        self._active_nav_name = None
+        self._sb_hover = None
+        self._sb_press = None
+        self._sb_peek_after_id = None
+        self._sb_peeking = False
+        self._sb_peek_pref = False
+        self._sb_popups = []      # the one reused tooltip popup, tracked so a
+                                  # failed configure can never strand it on screen
+        self._sb_tooltip_after_id = None
+        self._sb_tip_owner = None  # the row the bubble is describing
+        self._sb_badges = {}
+        self._sb_footer_word = None
+        self._sb_h = 0
         # A floating rounded rail rather than a flush panel: insetting it and
         # giving it the card radius plus a hairline edge is what makes the
         # window read as "curved" instead of four square slabs.
@@ -1081,6 +1141,18 @@ class UniversalAudioStudio(ctk.CTk):
         self.bg_animation_id = None
         self.bg_enabled = False
 
+        # Motion + rail preferences are read before any view is built: the
+        # "Sidebar & motion" card seeds its widgets from these values.
+        try:
+            self.nav_anim_enabled = bool(self._prefs.get('nav_animation_enabled', True))
+            self.nav_anim_speed = int(self._prefs.get('nav_animation_speed', 12) or 12)
+        except Exception:
+            self.nav_anim_enabled = True
+            self.nav_anim_speed = 12
+        # Hover-peek only means something while the rail is collapsed, and it
+        # stays off unless it was asked for.
+        self._sb_peek_pref = bool(self._prefs.get('sidebar_peek_on_hover', False))
+
         self.build_downloader_view()
         self.build_studio_view()
         self.build_customization_view()
@@ -1089,14 +1161,8 @@ class UniversalAudioStudio(ctk.CTk):
         self.build_history_view()
 
         # -----------------
-        # Sidebar contents (toggle, brand, nav items, accent indicator)
+        # Rail contents (brand, grouped nav rows, badge slots, footer toggle)
         # -----------------
-        try:
-            self.nav_anim_enabled = bool(self._prefs.get('nav_animation_enabled', True))
-            self.nav_anim_speed = int(self._prefs.get('nav_animation_speed', 12) or 12)
-        except Exception:
-            self.nav_anim_enabled = True
-            self.nav_anim_speed = 12
 
         # Saved download settings (#1 save folder, #2 audio format).
         try:
@@ -1757,6 +1823,9 @@ class UniversalAudioStudio(ctk.CTk):
         running = bool(self._queue_manager and self._queue_manager.is_running)
         self.queue_status.configure(
             text=f"{done}/{total} items • {overall}% • {'Active' if running else 'Idle'}")
+        # Same number in the rail's right slot, so the collapsed rail still
+        # reports work waiting for its turn (0 clears back to the "2" digit).
+        self._set_nav_badge('queue', max(0, total - done))
 
     def _queue_start(self):
         self._init_queue_manager()
@@ -3512,7 +3581,93 @@ class UniversalAudioStudio(ctk.CTk):
             bg_card, text="No animated background loaded.",
             font=UITheme.F(12), anchor="w", text_color="#95a5a6")
         self.bg_status.pack(fill="x", padx=16, pady=(0, 12))
+        # Rail behaviour. The collapse state, hover-peek and motion lengths
+        # are appearance choices, so they sit here rather than in Performance.
+        rail_card = self._settings_card(self.tab_customization,
+                                        "Sidebar & motion")
+        rail_card.pack(fill="x", padx=UITheme.PAD_X, pady=(0, 8))
+
+        self.sb_collapsed_var = tk.BooleanVar(value=not self._sidebar_expanded)
+        self.sb_collapsed_chk = ctk.CTkCheckBox(
+            rail_card, text="Start with the rail collapsed to icons",
+            variable=self.sb_collapsed_var, command=self._on_sb_collapsed_pref)
+        self.sb_collapsed_chk.pack(anchor="w", padx=16, pady=(4, 0))
+        ctk.CTkLabel(
+            rail_card,
+            text="Ctrl+B, or the row at the bottom of the rail, collapses it any time.",
+            font=UITheme.F(11), text_color="#95a5a6", anchor="w",
+            wraplength=560, justify="left").pack(anchor="w", padx=16, pady=(0, 4))
+
+        self.sb_peek_var = tk.BooleanVar(value=bool(self._sb_peek_pref))
+        self.sb_peek_chk = ctk.CTkCheckBox(
+            rail_card, text="Glide the rail open while the pointer rests on an icon",
+            variable=self.sb_peek_var, command=self._on_sb_peek_pref)
+        self.sb_peek_chk.pack(anchor="w", padx=16, pady=(0, 0))
+        ctk.CTkLabel(
+            rail_card,
+            text="Off by default — a rail that opens itself every time the pointer "
+                 "crosses it gets in the way. When on, only the icon column arms "
+                 "it, nothing moves but the width, and it closes as you leave.",
+            font=UITheme.F(11), text_color="#95a5a6", anchor="w",
+            wraplength=560, justify="left").pack(anchor="w", padx=16, pady=(0, 4))
+
+        self.nav_anim_var = tk.BooleanVar(value=bool(self.nav_anim_enabled))
+        self.nav_anim_chk = ctk.CTkCheckBox(
+            rail_card, text="Animate the accent pill and the rail's slide",
+            variable=self.nav_anim_var, command=self._on_nav_anim_pref)
+        self.nav_anim_chk.pack(anchor="w", padx=16, pady=(0, 2))
+
+        ctk.CTkLabel(rail_card, text="Motion length (lower is snappier):",
+                     font=UITheme.F(12), anchor="w").pack(anchor="w", padx=16,
+                                                          pady=(2, 0))
+        self.nav_anim_speed_slider = ctk.CTkSlider(
+            rail_card, from_=4, to=30, number_of_steps=26,
+            command=self._on_nav_speed)
+        self.nav_anim_speed_slider.set(self.nav_anim_speed)
+        self.nav_anim_speed_slider.pack(padx=16, pady=(0, 2), fill="x")
+        self.nav_anim_speed_lbl = ctk.CTkLabel(
+            rail_card, text=f"{int(self.nav_anim_speed)} frames",
+            font=UITheme.F(10), text_color="#95a5a6", anchor="w")
+        self.nav_anim_speed_lbl.pack(anchor="w", padx=16, pady=(0, 12))
+
         self.tab_customization.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    # --- Sidebar & motion preferences ------------------------------------
+    # Each one applies the moment it is changed: the rail is cheap to
+    # reconfigure, and making the user restart to see the effect of a
+    # checkbox is how you end up with settings nobody tunes.
+
+    def _on_sb_collapsed_pref(self):
+        want_collapsed = bool(self.sb_collapsed_var.get())
+        self._set_pref('sidebar_collapsed', want_collapsed)
+        if want_collapsed == self._sidebar_expanded:
+            self.toggle_sidebar()   # preview the choice immediately
+
+    def _on_sb_peek_pref(self):
+        self._sb_peek_pref = bool(self.sb_peek_var.get())
+        self._set_pref('sidebar_peek_on_hover', self._sb_peek_pref)
+        if not self._sb_peek_pref:
+            # Turning it off means off now, not whenever the pointer moves.
+            self._sb_cancel_peek()
+            if self._sb_peeking:
+                self._sb_peeking = False
+                self._animate_sidebar(False)
+
+    def _on_nav_anim_pref(self):
+        self.nav_anim_enabled = bool(self.nav_anim_var.get())
+        self._set_pref('nav_animation_enabled', self.nav_anim_enabled)
+
+    def _on_nav_speed(self, value):
+        try:
+            self.nav_anim_speed = int(float(value))
+        except Exception:
+            return
+        self._set_pref('nav_animation_speed', self.nav_anim_speed)
+        try:
+            self.nav_anim_speed_lbl.configure(
+                text=f"{self.nav_anim_speed} frames")
+        except Exception:
+            pass
 
     def build_performance_view(self):
         # Use a scrollable frame so all settings are reachable even on small screens
@@ -3736,39 +3891,54 @@ class UniversalAudioStudio(ctk.CTk):
             self._refresh_queue_tab()
 
     def _set_active_nav(self, active_name: str):
-        # Skip entirely when nothing changed: each fg_color configure makes
-        # CustomTkinter redraw every nav canvas, which compounds flicker.
+        # Skip entirely when nothing changed: a repaint redraws every row
+        # canvas, and page switches fire often (Ctrl+1..6, peek, clicks).
         if active_name == getattr(self, '_active_nav_name', None):
             return
-        active_color = UITheme.SIDEBAR_ACTIVE
-        inactive_color = "transparent"
-        for name, button in getattr(self, 'nav_buttons', {}).items():
-            try:
-                button.configure(fg_color=active_color if name == active_name else inactive_color)
-            except Exception:
-                pass
         self._active_nav_name = active_name
+        try:
+            self._repaint_nav_rows()
+        except Exception:
+            pass
 
     # -----------------
     # Navigation indicator helpers
     # -----------------
-    def _position_nav_indicator_initial(self):
+    def _indicator_slot(self, btn):
+        """Where the accent pill sits for a given nav row.
+
+        The pill lives in the gutter between the rail edge and the chips, so
+        it never covers a row's icon, and its x does not depend on the rail
+        width - which is why collapsing leaves it exactly where it was.
+        """
+        return (3, int(btn.winfo_y()) + 6, UITheme.SB_ROW_H - 12)
+
+    def _place_indicator(self, x, y, h):
+        """Move/size the accent pill.
+
+        CustomTkinter refuses width/height in ``place()`` (it raises), so the
+        size goes through ``configure`` - which is also why the pill used to
+        sit still: every placement was silently dying inside a try/except.
+        """
+        self.nav_indicator.configure(width=3, height=max(1, int(h)))
+        self.nav_indicator.place(x=int(x), y=int(y))
+
+    def _position_nav_indicator_initial(self, *_):
         try:
-            btn = self.nav_buttons.get('downloader')
+            btn = self.nav_buttons.get(getattr(self, '_active_nav_name', None)
+                                       or 'downloader')
             if btn is None or not getattr(self, 'nav_indicator', None):
                 return
-            y = btn.winfo_y()
-            h = btn.winfo_height()
-            self.nav_indicator.place(x=0, y=y + 4, width=4, height=max(20, h - 8))
+            x, y, h = self._indicator_slot(btn)
+            self._place_indicator(x, y, h)
         except Exception:
-            pass
- 
+            logger.debug("nav indicator placement failed", exc_info=True)
+
     def _animate_nav_to(self, target_btn: ctk.CTkButton):
         if not getattr(self, 'nav_anim_enabled', True) or not getattr(self, 'nav_indicator', None):
             try:
-                y = target_btn.winfo_y()
-                h = target_btn.winfo_height()
-                self.nav_indicator.place(x=0, y=y + 4, width=4, height=max(20, h - 8))
+                x, y, h = self._indicator_slot(target_btn)
+                self._place_indicator(x, y, h)
             except Exception:
                 pass
             return
@@ -3782,8 +3952,7 @@ class UniversalAudioStudio(ctk.CTk):
  
             start_y = float(self.nav_indicator.winfo_y())
             start_h = float(self.nav_indicator.winfo_height())
-            target_y = float(target_btn.winfo_y() + 4)
-            target_h = float(max(20, target_btn.winfo_height() - 8))
+            tx, target_y, th = self._indicator_slot(target_btn)
  
             steps = max(1, int(self.nav_anim_speed))
             def ease(t: float) -> float:
@@ -3794,8 +3963,8 @@ class UniversalAudioStudio(ctk.CTk):
                     t = min(1.0, i / steps)
                     progress = ease(t)
                     ny = start_y + (target_y - start_y) * progress
-                    nh = start_h + (target_h - start_h) * progress
-                    self.nav_indicator.place(x=0, y=int(ny), width=4, height=int(nh))
+                    nh = start_h + (th - start_h) * progress
+                    self._place_indicator(tx, ny, nh)
                     if i < steps:
                         self._nav_anim_after_id = self.after(12, lambda: step(i + 1))
                 except Exception:
@@ -3808,46 +3977,26 @@ class UniversalAudioStudio(ctk.CTk):
     # -----------------
     # Collapsible sidebar
     # -----------------
+    # The pages you work in, then the pages you tune. The flat order is
+    # unchanged - Ctrl+1..6 still map to downloader, queue, history, studio,
+    # settings, performance - grouping only adds a header above each set.
+    _SB_GROUPS = (("MENU", ("downloader", "queue", "history", "studio")),
+                  ("SETUP", ("settings", "performance")))
+    # Shown in each row's right slot, mirroring the <Control-N> bindings.
+    _SB_KEYS = {"downloader": "1", "queue": "2", "history": "3",
+                "studio": "4", "settings": "5", "performance": "6"}
+
     def _build_sidebar(self):
-        """Create the toggle, brand, nav items and sliding accent indicator."""
-        expanded = self._sidebar_expanded
+        """Brand, grouped nav rows, badge slots, footer toggle, accent pill.
 
-        self.sb_toggle_btn = ctk.CTkButton(
-            self.sidebar,
-            text='«' if expanded else '»',
-            width=32, height=28,
-            fg_color="transparent",
-            hover_color=UITheme.SIDEBAR_HOVER,
-            text_color="#ecf0f1",
-            cursor="hand2",
-            corner_radius=UITheme.RADIUS_MD,
-            font=UITheme.F(14, "bold"),
-            command=self.toggle_sidebar,
-        )
-        self.sb_toggle_btn.pack(fill="x", padx=8, pady=(10, 2))
-        self.sb_toggle_btn.configure(anchor='e' if expanded else 'center')
-        self.sb_toggle_btn.bind(
-            '<Enter>',
-            lambda e: self._schedule_sb_tooltip(
-                self.sb_toggle_btn, 'Collapse or expand the sidebar.  (Ctrl+B)'))
-        self.sb_toggle_btn.bind('<Leave>', lambda e: self._hide_sb_tooltip())
-
-        self.sb_brand = ctk.CTkLabel(
-            self.sidebar,
-            text='🎵 TuneLab' if expanded else '🎵',
-            font=UITheme.F(15, "bold"),
-            text_color="#ecf0f1",
-            anchor='w' if expanded else 'center',
-        )
-        self.sb_brand.pack(fill="x", padx=12, pady=(2, 2))
-
-        sep = ctk.CTkFrame(self.sidebar, height=1,
-                           fg_color=(self._palette.get("sidebar_active")
-                                     or UITheme.SIDEBAR_ACTIVE),
-                           corner_radius=0)
-        setattr(sep, "_theme_roles", {"fg_color": "sidebar_active"})
-        sep.pack(fill="x", padx=10, pady=(4, 10))
-
+        Everything in the rail is placed once at a fixed pixel position and
+        the collapse never moves or rewrites any of it: ``_sb_set_width``
+        changes widths only, and Tk clips what ends up outside the rail.
+        The old version swapped each row's text, anchor, font size and width
+        halfway through the slide, which is exactly what read as items
+        popping in and out.
+        """
+        pal = self._palette
         self._sb_items = {
             'downloader': ('⬇️', 'Downloader'),
             'queue': ('📋', 'Queue'),
@@ -3856,141 +4005,535 @@ class UniversalAudioStudio(ctk.CTk):
             'settings': ('🎨', 'Theme'),
             'performance': ('⚡', 'Speed'),
         }
-        self._sb_tips = {
-            'downloader': 'Switch to MP3/MP4 download tools.  (Ctrl+1)',
-            'queue': 'View and manage the download queue.  (Ctrl+2)',
-            'history': 'View and re-download past downloads.  (Ctrl+3)',
-            'studio': 'Open the slowed/reverb studio view.  (Ctrl+4)',
-            'settings': 'Customize UI style and performance.  (Ctrl+5)',
-            'performance': 'Tune performance options for smoother operation.  (Ctrl+6)',
-        }
-
-                
-        
+        # Hover tips: the row's own name plus its shortcut. A sentence here sits
+        # in a 300px box over the page, which is a lot of furniture to drop next
+        # to an icon that already says what it is.
+        self._sb_tips = {name: '%s  (Ctrl+%s)' % (label, self._SB_KEYS.get(name, '?'))
+                         for name, (_icon, label) in self._sb_items.items()}
         self.nav_buttons = {}
-        for name, (icon, label) in self._sb_items.items():
-            btn = ctk.CTkButton(
-                self.sidebar,
-                text=f'{icon}  {label}' if expanded else icon,
-                anchor='w' if expanded else 'center',
-                fg_color="transparent",
-                hover_color=UITheme.SIDEBAR_HOVER,
-                text_color="#ecf0f1",
-                cursor="hand2",
-                corner_radius=UITheme.RADIUS_MD,
-                font=UITheme.F(17 if not expanded else 13),
-                height=42,
-                width=46 if not expanded else 180,
-                command=lambda n=name: self.show_frame(n),
-            )
-            if not expanded:
-                btn.pack(pady=3, padx=4, anchor="center")
-            else:
-                btn.pack(fill="x", padx=8, pady=3)
-            btn.bind('<Enter>', lambda e, b=btn, t=self._sb_tips[name]: self._schedule_sb_tooltip(b, t))
-            btn.bind('<Leave>', lambda e: self._hide_sb_tooltip())
-            btn.bind('<Motion>', lambda e: self._hide_sb_tooltip())
-            self.nav_buttons[name] = btn
+        self._sb_icons = {}
+        self._sb_texts = {}
+        self._sb_hints = {}
+        self._sb_headers = []
 
-        # Sliding accent indicator (vertical bar that glides to the active item)
+        # Brand: an accent-tinted logo tile plus the wordmark. The tile sits
+        # in the same 30px icon column as the rows, so it neither moves nor
+        # drifts off-centre when the rail collapses to icon width. The wordmark
+        # starts where a row's label starts - past the icon column - so the
+        # collapsed rail (which is only pad + icon + pad wide) clips it whole
+        # instead of leaving the first letter poking out, cut in half.
+        self.sb_logo = ctk.CTkFrame(
+            self.sidebar, width=UITheme.SB_ICON_W, height=UITheme.SB_ICON_W,
+            corner_radius=UITheme.RADIUS_SM, fg_color="transparent",
+        )
+        self.sb_logo.place(x=UITheme.SB_PAD_X, y=14)
+        self.sb_logo_glyph = ctk.CTkLabel(
+            self.sb_logo, text="♪", font=UITheme.F(14, "bold"), cursor="hand2")
+        self.sb_logo_glyph.place(relx=0.5, rely=0.5, anchor="center")
+        self.sb_brand = ctk.CTkLabel(
+            self.sidebar, text="TuneLab", font=UITheme.F(14, "bold"),
+            anchor="w", cursor="hand2", height=UITheme.SB_ICON_W)
+        self.sb_brand.place(x=UITheme.SB_LABEL_X, y=14)
+        self._sb_bind_clickable(
+            self.sb_logo, (self.sb_logo_glyph, self.sb_brand),
+            lambda e: self.toggle_sidebar(),
+            'Collapse / expand  (Ctrl+B)', self.sb_logo)
+
+        y = 14 + UITheme.SB_ICON_W + 12
+        for title, names in self._SB_GROUPS:
+            hdr = ctk.CTkLabel(self.sidebar, text=" ".join(title),
+                               font=UITheme.F(9, "bold"), anchor="w",
+                               height=16)
+            hdr.place(x=UITheme.SB_LABEL_X, y=y + 1)
+            setattr(hdr, "_theme_roles", {"text_color": "sub"})
+            self._sb_headers.append(hdr)
+            y += 20
+            for name in names:
+                self._make_nav_row(name, y)
+                y += UITheme.SB_ROW_H + UITheme.SB_ROW_GAP
+            y += 8
+        self._sb_nav_bottom = y
+
+        # Footer: the collapse control belongs at the bottom of the rail,
+        # under the list it controls, not as a bar above the brand. It is a
+        # row like any other, so its label clips away when collapsed.
+        self._sb_footer_sep = ctk.CTkFrame(self.sidebar, height=1,
+                                           corner_radius=0, fg_color="transparent")
+        self.sb_toggle_btn = ctk.CTkFrame(
+            self.sidebar, width=UITheme.SB_ROW_W, height=UITheme.SB_ROW_H,
+            corner_radius=UITheme.RADIUS_MD, fg_color="transparent",
+            border_width=0,
+        )
+        self.sb_toggle_glyph = ctk.CTkLabel(
+            self.sb_toggle_btn, text='«', width=UITheme.SB_ICON_W,
+            height=UITheme.SB_ROW_H,
+            font=UITheme.F(15, "bold"), cursor="hand2")
+        self.sb_toggle_glyph.place(x=0, y=0)
+        self.sb_toggle_lbl = ctk.CTkLabel(
+            self.sb_toggle_btn, text='Collapse', font=UITheme.F(12),
+            anchor="w", cursor="hand2", height=UITheme.SB_ROW_H)
+        self.sb_toggle_lbl.place(x=UITheme.SB_TEXT_X, y=0)
+        self._sb_bind_clickable(
+            self.sb_toggle_btn, (self.sb_toggle_glyph, self.sb_toggle_lbl),
+            lambda e: self.toggle_sidebar(),
+            'Collapse / expand  (Ctrl+B)', self.sb_toggle_glyph,
+            name='__footer__')
+
+        # Accent pill: glides down the gutter to the selected row.
         self.nav_indicator = ctk.CTkFrame(
             self.sidebar,
-            width=4,
-            height=26,
-            fg_color=UITheme.COLOR_PRIMARY,
-            corner_radius=2,
+            width=3,
+            height=UITheme.SB_ROW_H - 12,
+            fg_color=pal.get('accent', UITheme.COLOR_PRIMARY),
+            corner_radius=1,
         )
 
-        # Double-click empty sidebar space also toggles collapse
+        self._sb_set_width(UITheme.SB_W_EXPANDED if self._sidebar_expanded
+                           else UITheme.SB_W_COLLAPSED)
+        self._layout_sidebar()
+
+        # Hover, peek and press are all decided in _sb_pointer_update from
+        # the real pointer position, and every widget in the rail reports in
+        # (Tk does not bubble events, so the chip and its labels each bind).
+        for seq in ('<Enter>', '<Leave>', '<Motion>'):
+            self.sidebar.bind(seq, self._sb_pointer_update)
+        # Keeps the footer glued to the bottom as the window is resized.
+        self.sidebar.bind('<Configure>', self._layout_sidebar)
+        # Double-click empty rail space also toggles collapse.
         self.sidebar.bind('<Double-Button-1>', lambda e: self.toggle_sidebar())
+        self._repaint_nav_rows()
+
+    def _make_nav_row(self, name, y):
+        """One nav row: icon column, label, and a right-hand slot.
+
+        The slot shows the Ctrl+<n> digit, or a live badge when something is
+        being counted (the Queue row shows unfinished items). Both sit at
+        SB_HINT_X, past the collapsed rail's edge, so neither has to be
+        hidden and nothing reflows.
+        """
+        icon, label = self._sb_items[name]
+        row = ctk.CTkFrame(
+            self.sidebar, width=UITheme.SB_ROW_W, height=UITheme.SB_ROW_H,
+            corner_radius=UITheme.RADIUS_MD, fg_color="transparent",
+            border_width=0,
+        )
+        row.place(x=UITheme.SB_PAD_X, y=y)
+        ic = ctk.CTkLabel(row, text=icon, width=UITheme.SB_ICON_W,
+                          height=UITheme.SB_ROW_H,
+                          font=UITheme.F(15), cursor="hand2")
+        ic.place(x=0, y=0)
+        tx = ctk.CTkLabel(row, text=label, font=UITheme.F(12), anchor="w",
+                          cursor="hand2", height=UITheme.SB_ROW_H)
+        tx.place(x=UITheme.SB_TEXT_X, y=0)
+        hint = ctk.CTkLabel(row, text=self._SB_KEYS.get(name, ""),
+                            width=22, height=18, corner_radius=9,
+                            font=UITheme.F(9, "bold"))
+        hint.place(x=UITheme.SB_HINT_X, y=(UITheme.SB_ROW_H - 18) // 2)
+
+        self._sb_bind_clickable(
+            row, (ic, tx, hint), lambda e, n=name: self.show_frame(n),
+            self._sb_tips[name], ic, name=name)
+        self.nav_buttons[name] = row
+        self._sb_icons[name] = ic
+        self._sb_texts[name] = tx
+        self._sb_hints[name] = hint
+        return row
+
+    def _sb_bind_clickable(self, row, children, on_click, tip, tip_anchor,
+                           name=None):
+        """Wire a rail row (or the brand/footer) for click, hover and press.
+
+        Events do not bubble in Tk: the chip and each label inside it have to
+        carry the bindings themselves, or hovering the text would do nothing.
+        """
+        def _release(event, n=name):
+            # Act on release, like CTkButton: the press tint is visible for the
+            # length of the click, and dragging off the row cancels the action.
+            self._sb_press_release(n)
+            if on_click is not None:
+                on_click(event)
+
+        for w in (row, *children):
+            try:
+                w.configure(cursor="hand2")
+            except Exception:
+                pass   # CTkFrame has no cursor option; its labels carry it
+            w.bind('<Button-1>', lambda e, n=name: self._sb_press_press(n))
+            w.bind('<ButtonRelease-1>', _release)
+            w.bind('<Enter>', self._sb_pointer_update)
+            w.bind('<Leave>', self._sb_pointer_update)
+            w.bind('<Motion>', self._sb_pointer_update)
+            if tip:
+                w.bind('<Enter>',
+                       lambda e, a=tip_anchor, t=tip:
+                       self._schedule_sb_tooltip(a, t), add='+')
+                w.bind('<Leave>', lambda e, a=tip_anchor: self._hide_sb_tooltip(a),
+                       add='+')
+
+    def _sb_press_press(self, name=None):
+        if name is not None and self._sb_press != name:
+            self._sb_press = name
+            self._repaint_nav_rows()
+
+    def _sb_press_release(self, name=None):
+        if self._sb_press is not None:
+            self._sb_press = None
+            self._repaint_nav_rows()
 
     def _refresh_sidebar_items(self):
-        """Swap sidebar texts/anchors to match the current collapsed state."""
-        expanded = self._sidebar_expanded
+        """Keep the one label that differs per state honest, and repaint.
+
+        Deliberately does not touch row texts, fonts or positions: those are
+        identical collapsed and expanded (the rail clips them), which is the
+        whole reason the slide no longer pops. The footer word is only ever
+        legible when the rail is wide, so _sb_set_width can rewrite it while
+        it is clipped.
+        """
+        self._sb_set_footer_word(self._sb_shown)
+        self._repaint_nav_rows()
+
+    def _sb_set_footer_word(self, expanded):
+        want = 'Collapse' if expanded else 'Expand'
+        if getattr(self, '_sb_footer_word', None) == want:
+            return
+        self._sb_footer_word = want
         try:
-            self.sb_toggle_btn.configure(text='«' if expanded else '»', anchor='e' if expanded else 'center')
-            self.sb_brand.configure(text='🎵 TuneLab' if expanded else '🎵', anchor='w' if expanded else 'center')
+            self.sb_toggle_lbl.configure(text=want)
         except Exception:
             pass
-        for name, (icon, label) in getattr(self, '_sb_items', {}).items():
-            btn = self.nav_buttons.get(name)
-            if btn is None:
-                continue
-            try:
-                btn.configure(
-                    text=f'{icon}  {label}' if expanded else icon,
-                    anchor='w' if expanded else 'center',
-                    font=UITheme.F(16 if not expanded else 13),
-                    width=44 if not expanded else 180,
-                )
-            except Exception:
-                pass
-        self._hide_sb_tooltip()
 
     def toggle_sidebar(self):
-        """Collapse or expand the sidebar with a smooth slide animation."""
+        """Collapse or expand the rail (Ctrl+B, the footer row, or the brand)."""
+        self._sb_cancel_peek()
+        self._sb_peeking = False   # a click makes the shown state the real one
         self._sidebar_expanded = not self._sidebar_expanded
         self._set_pref('sidebar_collapsed', not self._sidebar_expanded)
-        self._hide_sb_tooltip()
-        self._animate_sidebar()  # repositions the nav indicator when done
+        self._hide_sb_tooltip(force=True)
+        self._animate_sidebar()  # repositions the accent pill when done
 
-    def _animate_sidebar(self):
-        """Slide the sidebar width between collapsed and expanded."""
+    def _sb_set_width(self, width):
+        """The single place the rail's width is set.
+
+        The chips follow the rail so they keep their own rounded corners
+        instead of being sliced by its edge; everything *inside* a chip stays
+        put and is clipped by Tk, which is what makes the transition read as
+        a wipe rather than a reflow.
+        """
+        w = max(UITheme.SB_W_COLLAPSED,
+                min(UITheme.SB_W_EXPANDED, int(round(width))))
+        inner = max(UITheme.SB_ICON_W, w - 2 * UITheme.SB_PAD_X)
+        try:
+            self.sidebar.configure(width=w)
+        except Exception:
+            pass
+        self._sidebar_cur_w = w
+        for row in getattr(self, 'nav_buttons', {}).values():
+            try:
+                row.configure(width=inner)
+            except Exception:
+                pass
+        for widget, shrink in ((getattr(self, 'sb_toggle_btn', None), 0),
+                               (getattr(self, '_sb_footer_sep', None), 4)):
+            if widget is None:
+                continue
+            try:
+                widget.configure(width=max(1, inner - shrink))
+            except Exception:
+                pass
+        # The footer word lives past the clip line while collapsed. Rewriting
+        # it here - at the instant it is covered - is what keeps the wipe clean;
+        # changing it at the top of a slide would show the word flipping while
+        # still perfectly readable.
+        if w <= UITheme.SB_LABEL_X + 8:
+            self._sb_set_footer_word(self._sb_shown)
+
+    def _layout_sidebar(self, event=None):
+        """Pin the footer row and its hairline to the bottom of the rail."""
+        try:
+            h = self.sidebar.winfo_height()
+        except Exception:
+            return
+        if h < 40 or h == getattr(self, '_sb_h', 0):
+            return
+        self._sb_h = h
+        footer_y = max(getattr(self, '_sb_nav_bottom', 0) + 6,
+                       h - UITheme.SB_ROW_H - 10)
+        try:
+            self.sb_toggle_btn.place(x=UITheme.SB_PAD_X, y=footer_y)
+            self._sb_footer_sep.place(x=UITheme.SB_PAD_X + 2, y=footer_y - 9)
+        except Exception:
+            pass
+
+    def _animate_sidebar(self, target_expanded=None):
+        """Glide the rail's width - the only thing in it that changes.
+
+        One eased run of _sb_set_width calls. The previous version also
+        swapped every row's text/anchor/font/width at 60% of the run, which is
+        exactly the "pop in and out" this replaces.
+        """
         try:
             if self._sb_anim_after_id:
                 try:
                     self.after_cancel(self._sb_anim_after_id)
                 except Exception:
                     pass
+            self._sb_anim_after_id = None
 
-            start_w = float(getattr(self, '_sidebar_cur_w', None)
+            if target_expanded is None:
+                target_expanded = self._sidebar_expanded
+            target_w = float(UITheme.SB_W_EXPANDED if target_expanded
+                             else UITheme.SB_W_COLLAPSED)
+            start_w = float(getattr(self, '_sidebar_cur_w', 0)
                             or self.sidebar.winfo_width()
-                            or UITheme.SB_W_EXPANDED)
-            target_w = float(UITheme.SB_W_EXPANDED if self._sidebar_expanded else UITheme.SB_W_COLLAPSED)
-            swap_done = False
-            _interval = 16  # ms (~60fps)
-            _steps = max(10, int(getattr(self, 'nav_anim_speed', 12) or 12))
-            self._sidebar_cur_w = int(start_w)
+                            or target_w)
+            self._sb_shown = bool(target_expanded)
 
-            def ease(t):
-                return 1 - (1 - t) ** 3  # ease-out-cubic for natural feel
-
-            def step(i):
-                nonlocal swap_done
-                t = min(1.0, i / _steps)
-                w = int(round(start_w + (target_w - start_w) * ease(t)))
+            def finish():
+                self._sb_anim_after_id = None
+                self._sb_set_width(target_w)
+                # Safety net: a mid-slide reversal may never have reached the
+                # clipped widths where the word is normally rewritten.
+                self._sb_set_footer_word(self._sb_shown)
                 try:
-                    self.sidebar.configure(width=w)
-                    self._sidebar_cur_w = w
+                    self._hide_sb_tooltip(force=True)
+                    self._position_nav_indicator_initial()
+                    self._repaint_nav_rows()
                 except Exception:
                     pass
-                # Swap text exactly once at 60% (past the visual midpoint).
-                if not swap_done and i >= int(_steps * 0.6):
-                    swap_done = True
-                    self._refresh_sidebar_items()
+
+            if (not getattr(self, 'nav_anim_enabled', True)
+                    or abs(target_w - start_w) < 1.5):
+                finish()
+                return
+
+            _interval = 14  # ms (~70fps)
+            _steps = max(6, int(getattr(self, 'nav_anim_speed', 12) or 12))
+
+            def ease(t):
+                return 1 - (1 - t) ** 4   # ease-out-quart: leaves fast, stops soft
+
+            def step(i):
+                t = min(1.0, i / _steps)
+                self._sb_set_width(start_w + (target_w - start_w) * ease(t))
                 if i < _steps:
-                    self._sb_anim_after_id = self.after(_interval, lambda: step(i + 1))
+                    self._sb_anim_after_id = self.after(
+                        _interval, lambda: step(i + 1))
                 else:
-                    # Guarantee the exact final width.
-                    try:
-                        self.sidebar.configure(width=int(target_w))
-                        self._sidebar_cur_w = int(target_w)
-                    except Exception:
-                        pass
-                    self._sb_anim_after_id = None
-                    try:
-                        self._hide_sb_tooltip()
-                        self._position_nav_indicator_initial()
-                    except Exception:
-                        pass
+                    finish()
 
             step(0)
         except Exception:
             pass
 
+    def _sb_pointer_update(self, event=None):
+        """The single brain for hover and peek: derive it from the pointer.
+
+        Enter/Leave fire per widget and Tk does not bubble, so moving from a
+        row onto its own icon label fires Leave then Enter. Re-deriving from
+        the real pointer position turns that churn into a no-op instead of a
+        flicker, and clipped rows (whose geometry still says "wide") are
+        excluded by the rail's visible right edge.
+        """
+        try:
+            rail = getattr(self, 'sidebar', None)
+            if rail is None or not rail.winfo_ismapped():
+                return
+            px, py = self.winfo_pointerxy()
+            rx, ry = rail.winfo_rootx(), rail.winfo_rooty()
+            rw, rh = rail.winfo_width(), rail.winfo_height()
+            inside = (rx <= px < rx + rw) and (ry <= py < ry + rh)
+            hover = None
+            if inside:
+                edge = rx + rw
+                candidates = list(getattr(self, 'nav_buttons', {}).items())
+                candidates.append(('__footer__',
+                                   getattr(self, 'sb_toggle_btn', None)))
+                for name, row in candidates:
+                    if row is None or not row.winfo_ismapped():
+                        continue
+                    x, y = row.winfo_rootx(), row.winfo_rooty()
+                    w = min(row.winfo_width(), edge - x)
+                    if w <= 0:
+                        continue
+                    if x <= px < x + w and y <= py < y + row.winfo_height():
+                        hover = name
+                        break
+            if hover != getattr(self, '_sb_hover', None):
+                self._sb_hover = hover
+                self._repaint_nav_rows()
+            # Peek is armed by the nav rows, not by the whole rail: resting on
+            # the footer chip - which sits in the very same column, so an x
+            # band cannot tell them apart - or on the empty space under the
+            # list must not throw the rail open. While a peek is already open
+            # the pointer may go anywhere inside it, or the rail would slam
+            # shut the moment it moved onto the labels it just revealed.
+            armed = hover is not None and hover != '__footer__'
+            self._sb_peek_track(inside and (armed or self._sb_peeking))
+        except Exception:
+            pass
+
+    def _sb_peek_track(self, inside):
+        """Let a collapsed rail glide open while the pointer is resting in it.
+
+        Only the width changes and the icon column never moves, so the rail
+        can open under the cursor without the target item shifting.
+        """
+        if not getattr(self, '_sb_peek_pref', False):
+            return
+        if inside:
+            if (self._sidebar_expanded or self._sb_peeking
+                    or self._sb_peek_after_id is not None
+                    or getattr(self, '_sb_anim_after_id', None)):
+                return
+            try:
+                # 220ms: passing through on the way to the content should not
+                # open the rail, resting on an icon should.
+                self._sb_peek_after_id = self.after(220, self._sb_peek_open)
+            except Exception:
+                self._sb_peek_after_id = None
+            return
+        self._sb_cancel_peek()
+        if self._sb_peeking:
+            self._sb_peeking = False
+            self._animate_sidebar(False)
+
+    def _sb_cancel_peek(self):
+        pending = getattr(self, '_sb_peek_after_id', None)
+        if pending:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+        self._sb_peek_after_id = None
+
+    def _sb_peek_open(self):
+        self._sb_peek_after_id = None
+        if self._sidebar_expanded or self._sb_peeking:
+            return
+        self._sb_peeking = True
+        self._animate_sidebar(True)
+
+    def _repaint_nav_rows(self):
+        """Paint every rail piece from the palette + hover/press/active state.
+
+        Selection is an accent-tinted chip with a hairline ring and an accent
+        icon. Both are mixed per palette, because the old fixed #2c3e50 chip
+        vanished on the dark rails and went muddy on the light ones.
+        """
+        pal = getattr(self, '_palette', {}) or {}
+        base = pal.get('sidebar', UITheme.SIDEBAR_BG)
+        accent = pal.get('accent', UITheme.COLOR_PRIMARY)
+        text_c = pal.get('text', '#ecf0f1')
+        sub_c = pal.get('sub', UITheme.COLOR_GRAY)
+        hover_fill = _mix(base, pal.get('hover', UITheme.SIDEBAR_HOVER), 0.85)
+        active_fill = _mix(base, accent, 0.18)
+        active_edge = _mix(base, accent, 0.45)
+        press_fill = _mix(base, accent, 0.32)
+        idle_text = _mix(base, text_c, 0.82)
+        active = getattr(self, '_active_nav_name', None)
+        hover = getattr(self, '_sb_hover', None)
+        press = getattr(self, '_sb_press', None)
+
+        for name, row in getattr(self, 'nav_buttons', {}).items():
+            is_active = name == active
+            fill, edge, bw = "transparent", "transparent", 0
+            icon_c, label_c = sub_c, idle_text
+            if is_active:
+                fill, edge, bw = active_fill, active_edge, 1
+                icon_c, label_c = accent, text_c
+            elif name == press:
+                fill, icon_c, label_c = press_fill, accent, text_c
+            elif name == hover:
+                fill, icon_c, label_c = hover_fill, accent, text_c
+            try:
+                row.configure(fg_color=fill, border_width=bw, border_color=edge)
+                self._sb_icons[name].configure(text_color=icon_c)
+                self._sb_texts[name].configure(text_color=label_c)
+            except Exception:
+                pass
+            self._repaint_nav_hint(name, base, accent, text_c, sub_c)
+
+        # Brand tile, footer chip, hairline, section headers.
+        try:
+            self.sb_logo.configure(
+                fg_color=_mix(base, accent, 0.16),
+                border_width=1, border_color=_mix(base, accent, 0.34))
+            self.sb_logo_glyph.configure(text_color=accent)
+            self.sb_brand.configure(text_color=text_c)
+        except Exception:
+            pass
+        try:
+            on_footer = hover == '__footer__'
+            self.sb_toggle_btn.configure(
+                fg_color=(press_fill if press == '__footer__'
+                          else (hover_fill if on_footer else "transparent")),
+                border_width=0)
+            self.sb_toggle_glyph.configure(
+                text_color=accent if on_footer else sub_c)
+            self.sb_toggle_lbl.configure(
+                text_color=text_c if on_footer else idle_text)
+            self._sb_footer_sep.configure(fg_color=_mix(base, sub_c, 0.28))
+        except Exception:
+            pass
+        for hdr in getattr(self, '_sb_headers', []):
+            try:
+                hdr.configure(text_color=_mix(base, sub_c, 0.9))
+            except Exception:
+                pass
+
+    def _repaint_nav_hint(self, name, base=None, accent=None,
+                          text_c=None, sub_c=None):
+        """Right slot: an accent badge while a count is set, else the digit.
+
+        Takes the already-mixed colors when _repaint_nav_rows is looping (so
+        the palette is read once), and can be called with just a name from
+        _set_nav_badge when a count changes on its own.
+        """
+        lbl = getattr(self, '_sb_hints', {}).get(name)
+        if lbl is None:
+            return
+        if base is None:
+            pal = getattr(self, '_palette', {}) or {}
+            base = pal.get('sidebar', UITheme.SIDEBAR_BG)
+            accent = pal.get('accent', UITheme.COLOR_PRIMARY)
+            text_c = pal.get('text', '#ecf0f1')
+            sub_c = pal.get('sub', UITheme.COLOR_GRAY)
+        count = getattr(self, '_sb_badges', {}).get(name) or 0
+        try:
+            if count:
+                lbl.configure(
+                    text=str(count if count < 100 else "99+"),
+                    fg_color=accent,
+                    text_color=_on_color(accent, text_c, base),
+                    border_width=0)
+            else:
+                lbl.configure(text=self._SB_KEYS.get(name, ""),
+                              fg_color="transparent", text_color=sub_c)
+        except Exception:
+            pass
+
+    def _set_nav_badge(self, name: str, count) -> None:
+        """Put a live count in a nav row's right slot (0 clears it)."""
+        try:
+            self._sb_badges[name] = int(count or 0)
+        except Exception:
+            return
+        self._repaint_nav_hint(name)
+
     def _schedule_sb_tooltip(self, widget, text: str, only_when_collapsed: bool = True):
         """Delay tooltip show to avoid flicker when the mouse moves quickly."""
         try:
+            # Remember what the bubble belongs to: the row, not the exact label
+            # the pointer happened to be over (see _hide_sb_tooltip).
+            self._sb_tip_owner = self._sb_tip_row(widget)
+            # Repainting a row re-places the CTk canvas/label inside it, and Tk
+            # answers by firing Enter/Leave for rows the pointer is nowhere
+            # near - which used to open the wrong row's bubble, or cancel the
+            # right one. An Enter from the rail only counts when the pointer is
+            # genuinely on that row.
+            if self._sb_in_rail(widget) and \
+                    not self._sb_pointer_on(self._sb_tip_owner):
+                return
             pending = getattr(self, '_sb_tooltip_after_id', None)
             if pending:
                 try:
@@ -4003,9 +4546,9 @@ class UniversalAudioStudio(ctk.CTk):
             pass
 
     def _show_sb_tooltip(self, widget, text: str, only_when_collapsed: bool = True):
-        """Floating label beside the widget.
+        """Floating label just outside the rail, level with *widget*.
 
-        The collapsed nav rail uses it for icon labels; the History row
+        The collapsed nav rail uses it for icon names; the History row
         actions reuse it (``only_when_collapsed=False``) for their
         glyph-only buttons.
         """
@@ -4013,40 +4556,29 @@ class UniversalAudioStudio(ctk.CTk):
             # Suppress tooltip during sidebar animation to prevent flicker.
             if getattr(self, '_sb_anim_after_id', None):
                 return
-            if only_when_collapsed and self._sidebar_expanded:
-                self._hide_sb_tooltip()
+            # Also while peeking: the labels are already readable then, and a
+            # bubble over them would only cover the row it describes.
+            if only_when_collapsed and (self._sidebar_expanded
+                                        or getattr(self, '_sb_shown', False)):
+                self._hide_sb_tooltip(force=True)
                 return
-            x = widget.winfo_rootx() + widget.winfo_width() + 8
+            # One anchor per row, pinned to the rail's edge: anchoring to
+            # whichever label the pointer happened to be over made the bubble
+            # jump to three different spots as the mouse crossed an icon, its
+            # text and its badge slot. Widgets outside the rail (the History
+            # row's glyph buttons) still get their bubble beside themselves.
+            rail = self.sidebar
+            if self._sb_in_rail(widget):
+                x = rail.winfo_rootx() + rail.winfo_width() + 6
+            else:
+                x = widget.winfo_rootx() + widget.winfo_width() + 8
             y = widget.winfo_rooty() + max(0, (widget.winfo_height() - 26) // 2)
 
             tip_bg = self._palette.get('sidebar_active', UITheme.SIDEBAR_ACTIVE)
             tip_fg = self._palette.get('text', '#ecf0f1')
 
-            tp = getattr(self, '_sb_tooltip', None)
-            if tp is None or not tp.winfo_exists():
-                # Reuse ONE hidden popup instead of creating/destroying a
-                # borderless Toplevel on every hover. On Windows a freshly
-                # mapped borderless Toplevel paints as a solid black
-                # rectangle for a frame until its contents render, which
-                # showed up as random black flickers while clicking around.
-                tp = tk.Toplevel(self)
-                tp.withdraw()
-                tp.overrideredirect(True)
-                tp.attributes('-topmost', True)
-                self._sb_tooltip_lbl = tk.Label(
-                    tp,
-                    padx=9,
-                    pady=4,
-                    font=UITheme.F(10),
-                )
-                self._sb_tooltip_lbl.pack()
-                self._sb_tooltip = tp
-
-            try:
-                self._sb_tooltip_lbl.configure(text=text, bg=tip_bg, fg=tip_fg)
-            except Exception:
-                pass
-
+            tp = self._sb_popup()
+            self._sb_tooltip_lbl.configure(text=text, bg=tip_bg, fg=tip_fg)
             tp.wm_geometry(f'+{x}+{y}')
 
             # Avoid restack churn: only re-paint/re-show when the popup is
@@ -4057,9 +4589,134 @@ class UniversalAudioStudio(ctk.CTk):
                 tp.update_idletasks()
                 tp.deiconify()
         except Exception:
-            self._sb_tooltip = None
+            # Whatever went wrong, nothing may be left painted on screen.
+            # Dropping the only reference to a mapped popup here is what used
+            # to strand little boxes around the rail that never went away.
+            self._drop_sb_popups()
 
-    def _hide_sb_tooltip(self):
+    @staticmethod
+    def _alive(widget) -> bool:
+        try:
+            return bool(widget.winfo_exists())
+        except Exception:
+            return False
+
+    def _sb_in_rail(self, widget) -> bool:
+        """Is *widget*, or one of its ancestors, part of the rail?"""
+        rail = getattr(self, 'sidebar', None)
+        node = widget
+        while node is not None and rail is not None:
+            if node is rail:
+                return True
+            node = getattr(node, 'master', None)
+        return False
+
+    def _sb_tip_row(self, widget):
+        """The rail row *widget* belongs to, or *widget* itself.
+
+        The bubble is scheduled from an anchor (the icon) but has to stay put
+        while the pointer wanders anywhere over the same row, so the region to
+        test is the row and not the glyph.
+        """
+        rail = getattr(self, 'sidebar', None)
+        node = getattr(widget, 'master', None)
+        while node is not None and rail is not None:
+            if getattr(node, 'master', None) is rail:
+                return node
+            node = getattr(node, 'master', None)
+        return widget
+
+    def _sb_pointer_on(self, owner) -> bool:
+        """Is the pointer still on *owner* (or on the bubble above it)?
+
+        A rail row is measured up to the rail's visible edge - collapsed, its
+        geometry still claims the full expanded width and would swallow part of
+        the page. The bubble itself is the exception: it hangs over the page
+        just outside the rail, and a tooltip you can dismiss by hovering it
+        would vanish the moment you tried to read it.
+        """
+        try:
+            if owner is None or not owner.winfo_exists():
+                return False
+            px, py = self.winfo_pointerxy()
+            for tp in getattr(self, '_sb_popups', []):
+                if not tp.winfo_exists() or not tp.winfo_viewable():
+                    continue
+                if (tp.winfo_rootx() <= px < tp.winfo_rootx() + tp.winfo_width()
+                        and tp.winfo_rooty() <= py
+                        <= tp.winfo_rooty() + tp.winfo_height()):
+                    return True
+            x, y = owner.winfo_rootx(), owner.winfo_rooty()
+            w, h = owner.winfo_width(), owner.winfo_height()
+            rail = getattr(self, 'sidebar', None)
+            if rail is not None and owner is not rail and self._sb_in_rail(owner):
+                w = min(w, rail.winfo_rootx() + rail.winfo_width() - x)
+            return w > 0 and h > 0 and x <= px < x + w and y <= py < y + h
+        except Exception:
+            return False
+
+    def _sb_popup(self):
+        """The single reused popup, created on first use.
+
+        Reusing ONE hidden Toplevel instead of creating/destroying a borderless
+        one per hover is deliberate: on Windows a freshly mapped borderless
+        Toplevel paints as a solid black rectangle for a frame. Any popup that
+        went missing (destroyed with its toplevel, say) is dropped here too, so
+        at most one of them can ever exist.
+        """
+        live = [tp for tp in getattr(self, '_sb_popups', []) if self._alive(tp)]
+        for dead in getattr(self, '_sb_popups', []):
+            if dead not in live:
+                try:
+                    dead.destroy()
+                except Exception:
+                    pass
+        self._sb_popups = live
+        if live:
+            return live[0]
+        tp = tk.Toplevel(self)
+        tp.withdraw()
+        tp.overrideredirect(True)
+        tp.attributes('-topmost', True)
+        # The bubble is allowed to be hovered (see _sb_pointer_on), and nothing
+        # in the rail learns when the pointer finally comes off it - so it has
+        # to dismiss itself. A bubble that outlives its hover is the exact
+        # fragment this rail used to litter the page with.
+        tp.bind('<Leave>', lambda e: self._hide_sb_tooltip(force=True))
+        self._sb_tooltip_lbl = tk.Label(
+            tp,
+            padx=9,
+            pady=4,
+            font=UITheme.F(10),
+        )
+        self._sb_tooltip_lbl.pack()
+        self._sb_popups = [tp]
+        return tp
+
+    def _drop_sb_popups(self):
+        """Destroy every tooltip popup (used when one cannot be trusted)."""
+        for tp in getattr(self, '_sb_popups', []):
+            try:
+                tp.destroy()
+            except Exception:
+                pass
+        self._sb_popups = []
+
+    def _hide_sb_tooltip(self, widget=None, force: bool = False):
+        """Withdraw the bubble once the pointer has really left its row.
+
+        A repaint that re-places a CTk label makes Tk report a <Leave> for the
+        widget the pointer is still sitting on - and hovering a row repaints it
+        (icon and label change colour). Cancelling on that Leave is why the
+        bubble never appeared at all while a rail row was hovered: the hover
+        fired Enter, the repaint it caused fired Leave, and the pending show was
+        cancelled 450ms before it was due. So a Leave only counts when the
+        pointer is off the row the bubble belongs to.
+        """
+        owner = widget if widget is not None else getattr(self, '_sb_tip_owner', None)
+        if not force and owner is not None and self._sb_pointer_on(owner):
+            return
+        self._sb_tip_owner = None
         # Cancel any pending delayed show when the mouse moves away (flicker fix).
         pending = getattr(self, '_sb_tooltip_after_id', None)
         if pending:
@@ -4068,8 +4725,7 @@ class UniversalAudioStudio(ctk.CTk):
             except Exception:
                 pass
             self._sb_tooltip_after_id = None
-        tp = getattr(self, '_sb_tooltip', None)
-        if tp is not None:
+        for tp in getattr(self, '_sb_popups', []):
             try:
                 # Withdraw instead of destroy: creating a brand-new
                 # borderless popup per Enter/Leave event is what produced
@@ -4342,13 +4998,16 @@ class UniversalAudioStudio(ctk.CTk):
                 except Exception:
                     pass
 
-        # Header + sidebar text accents
+        # Header + rail text accents
         try:
             self.title_lbl.configure(text_color=pal['text'])
-            self.sb_brand.configure(text_color=pal['text'])
-            self.sb_toggle_btn.configure(text_color=pal['text'])
         except Exception:
             pass
+        # The rail derives every piece of it (chips, badges, brand tile,
+        # footer, section headers) from the palette, so a theme switch is just
+        # a repaint - this used to hand-tune two labels and leave the rest of
+        # the rail on the previous theme's colors.
+        self._repaint_nav_rows()
 
         # Checkboxes: checked fill follows the accent.
         for cb_name in ('overlay_chk', 'compact_chk', 'opacity_chk', 'disable_max_chk',

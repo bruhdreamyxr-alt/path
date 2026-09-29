@@ -48,6 +48,24 @@ def _method_source(name: str) -> str:
     return m.group(0)
 
 
+def _place_calls():
+    """Every ``.place(...)`` call in ui.py as ``(line number, call text)``.
+
+    Balanced by hand rather than matched with one regex: these calls span
+    lines and carry nested calls, so a pattern that stops at the first ")"
+    would sometimes read half the arguments and miss the size keywords.
+    """
+    src = _source()
+    calls = []
+    for m in re.finditer(r"\.place\(", src):
+        i, depth = m.end(), 1
+        while i < len(src) and depth:
+            depth += {"(": 1, ")": -1}.get(src[i], 0)
+            i += 1
+        calls.append((src[:m.start()].count("\n") + 1, src[m.start():i]))
+    return calls
+
+
 class UrlEnterBindingTests(unittest.TestCase):
     """Enter in the URL box must start the primary action (Tier 1 #1)."""
 
@@ -752,6 +770,253 @@ class ToastMotionTests(unittest.TestCase):
                 self.assertIn("self.after(", line,
                               "worker calls _finalize_download directly")
         self.assertIn("self.show_toast(f\"Saved", _source())
+
+
+class SidebarRailTests(unittest.TestCase):
+    """The rail collapses by width alone and never fails silently.
+
+    Every guard here pins a failure that ships invisibly. CustomTkinter's
+    ``place()`` *raises* on width=/height=, so a size sent that way inside a
+    try/except never applies at all: that is how the accent pill sat still and
+    the brand/toggle labels kept their build-time geometry. And because the
+    rail's clip is what hides the labels, any text changed at a readable width
+    is the pop-in/pop-out the wipe exists to remove.
+    """
+
+    def test_no_size_is_ever_passed_to_place(self):
+        bad = ["line %d: %s" % (n, " ".join(call.split()))
+               for n, call in _place_calls()
+               if re.search(r"\b(width|height)=", call)]
+        self.assertEqual(
+            bad, [],
+            "CustomTkinter rejects width=/height= in place() (it raises, so "
+            "inside a try/except the size silently never applies); size with "
+            "configure() and only position with place(x=, y=): " + " | ".join(bad))
+
+    def test_the_rail_resizes_through_one_clamped_helper(self):
+        body = _method_source("_sb_set_width")
+        self.assertIn("self.sidebar.configure(width=w)", body)
+        self.assertIn("row.configure(width=inner)", body)   # chips follow the edge
+        self.assertIn("self._sidebar_cur_w = w", body)      # frames read this back
+        self.assertIn("max(UITheme.SB_W_COLLAPSED", body)   # never past either end
+        self.assertIn("min(UITheme.SB_W_EXPANDED", body)
+
+    def test_the_footer_word_is_rewritten_only_under_the_clip(self):
+        body = _method_source("_sb_set_width")
+        self.assertIn("if w <= UITheme.SB_LABEL_X + 8:", body)
+        self.assertIn("self._sb_set_footer_word(self._sb_shown)", body)
+        self.assertLess(body.index("_sidebar_cur_w = w"),
+                        body.index("_sb_set_footer_word"),
+                        "the width has to be known before the word is judged "
+                        "readable or covered")
+
+    def test_a_slide_is_one_eased_run_with_a_cancelable_token(self):
+        body = _method_source("_animate_sidebar")
+        self.assertIn("after_cancel", body)                 # a reversal restarts
+        self.assertIn("self._sb_shown = bool(target_expanded)", body)
+        self.assertIn("if (not getattr(self, 'nav_anim_enabled', True)", body)
+        self.assertIn("abs(target_w - start_w) < 1.5", body)  # no-op runs end now
+        # When the run lands, the pill and the word are re-seated.
+        self.assertIn("self._sb_set_footer_word(self._sb_shown)", body)
+        self.assertIn("self._position_nav_indicator_initial()", body)
+        # Only the width moves: no font or anchor flip mid-slide.
+        self.assertNotIn("configure(font=", body)
+        self.assertNotIn("anchor=", body)
+
+    def test_nothing_but_the_width_helper_touches_the_footer_word(self):
+        for name in ("toggle_sidebar", "_sb_peek_open", "_sb_pointer_update"):
+            self.assertNotIn(
+                "_sb_set_footer_word", _method_source(name),
+                "%s must let the clip decide when the word may change" % name)
+
+    def test_the_pill_is_sized_by_configure_not_place(self):
+        body = _method_source("_place_indicator")
+        self.assertIn("self.nav_indicator.configure(width=3, height=", body)
+        self.assertIn("self.nav_indicator.place(x=int(x), y=int(y))", body)
+        # The gutter x does not depend on the rail width, which is why
+        # collapsing leaves the pill exactly where it was.
+        self.assertIn("return (3, int(btn.winfo_y()) + 6",
+                      _method_source("_indicator_slot"))
+
+
+    def test_a_clipped_row_cannot_be_hovered_through_its_chip(self):
+        body = _method_source("_sb_pointer_update")
+        self.assertIn("self.winfo_pointerxy()", body)        # not Enter/Leave churn
+        self.assertIn("edge = rx + rw", body)                # the rail's visible edge
+        self.assertIn("min(row.winfo_width(), edge - x)", body)
+        self.assertIn("self._repaint_nav_rows()", body)
+        # Peek is driven from the same derived state, armed by nav rows only.
+        self.assertIn("self._sb_peek_track(inside and (armed or "
+                      "self._sb_peeking))", body)
+
+    def test_every_visual_state_change_goes_through_one_painter(self):
+        for name in ("_build_sidebar", "_set_active_nav", "_sb_press_press",
+                     "_sb_press_release", "_sb_pointer_update",
+                     "apply_color_theme"):
+            self.assertIn(
+                "_repaint_nav_rows()", _method_source(name),
+                "%s changes how the rail looks but does not use the shared "
+                "painter, so it drifts on the next theme switch" % name)
+        # The painter reads the live palette - that is what makes a theme
+        # switch repaint the rail instead of leaving built widgets behind.
+        self.assertIn("_palette", _method_source("_repaint_nav_rows"))
+
+    def test_the_badge_slot_caps_and_clears(self):
+        body = _method_source("_repaint_nav_hint")
+        self.assertIn('str(count if count < 100 else "99+")', body)
+        self.assertIn('text=self._SB_KEYS.get(name, "")', body)   # back to the digit
+        self.assertIn("fg_color=accent", body)
+        self.assertIn("_on_color(accent, text_c, base)", body)   # readable ink
+        # The queue's remaining count is what drives the queue row's badge.
+        self.assertIn("self._set_nav_badge('queue'",
+                      _method_source("_update_queue_status"))
+
+    def test_peek_waits_for_a_rest_and_only_moves_the_width(self):
+        body = _method_source("_sb_peek_track")
+        self.assertIn("self.after(220, self._sb_peek_open)", body)
+        self.assertIn("'_sb_peek_pref', False", body)         # unset = never peek
+        # A pointer merely passing through must not fight a slide in flight.
+        self.assertIn("_sb_anim_after_id", body)
+        self.assertIn("self._animate_sidebar(False)", body)
+        # A second pointer sample (or a click that already expanded the rail)
+        # must not restart a peek that is open or on its way open.
+        opened = _method_source("_sb_peek_open")
+        self.assertIn("if self._sidebar_expanded or self._sb_peeking:", opened)
+        self.assertIn("self._sb_peeking = True", opened)
+        self.assertIn("self._animate_sidebar(True)", opened)
+        # Peeking is a preview, not a state change: no pref is written.
+        self.assertNotIn("_set_pref", _method_source("_sb_peek_open"))
+
+    def test_each_rail_preference_applies_and_persists(self):
+        for handler, pref in (("_on_sb_collapsed_pref", "sidebar_collapsed"),
+                              ("_on_sb_peek_pref", "sidebar_peek_on_hover"),
+                              ("_on_nav_anim_pref", "nav_animation_enabled"),
+                              ("_on_nav_speed", "nav_animation_speed")):
+            self.assertIn("_set_pref('%s'" % pref, _method_source(handler),
+                          "%s must persist %s" % (handler, pref))
+        self.assertIn('f"{self.nav_anim_speed} frames"',
+                      _method_source("_on_nav_speed"))
+        # Turning peek off ends one that is already open, now rather than later.
+        peek = _method_source("_on_sb_peek_pref")
+        self.assertLess(peek.index("_sb_cancel_peek()"),
+                        peek.index("_animate_sidebar(False)"))
+
+    def test_the_card_is_built_from_prefs_read_before_the_rail(self):
+        card = _method_source("build_customization_view")
+        for attr in ("sb_collapsed_chk", "sb_peek_chk", "nav_anim_chk",
+                     "nav_anim_speed_slider", "nav_anim_speed_lbl"):
+            self.assertIn(attr, card)
+        self.assertIn('"Sidebar & motion"', card)
+        # Seeding those widgets needs the values already in hand, so the
+        # reads have to precede the rail's own build.
+        init = _method_source("__init__")
+        self.assertIn('self._prefs.get("sidebar_collapsed"', init)
+        self.assertIn("self._prefs.get('nav_animation_speed', 12)", init)
+        self.assertIn("self._prefs.get('sidebar_peek_on_hover', False)", init)
+        self.assertLess(init.index("'nav_animation_speed', 12"),
+                        init.index("self._build_sidebar()"))
+
+
+    def test_a_repaint_leave_may_not_cancel_the_hover_it_just_painted(self):
+        # Repainting the hovered row (its icon and label change colour) re-places
+        # the CTk canvas/label inside it, and Tk reports that as a <Leave> for
+        # the widget the pointer is still on. Honouring it hid the bubble again:
+        # the hover fired Enter, its own repaint fired Leave, and the pending
+        # show died 450ms before it was due.
+        hide = _method_source("_hide_sb_tooltip")
+        self.assertIn("if not force and owner is not None and "
+                      "self._sb_pointer_on(owner):", hide)
+        self.assertIn("self._sb_tip_owner = self._sb_tip_row(widget)",
+                      _method_source("_schedule_sb_tooltip"))
+        # The rail's Enter is only trusted when the pointer is really there, so
+        # the same churn cannot open a bubble for a row it never touched.
+        self.assertIn("not self._sb_pointer_on(self._sb_tip_owner)",
+                      _method_source("_schedule_sb_tooltip"))
+        # Everything that tears the rail down (toggle, animation end, the
+        # expanded rail) has to hide the bubble outright.
+        self.assertIn("self._hide_sb_tooltip(force=True)",
+                      _method_source("toggle_sidebar"))
+        self.assertIn("self._hide_sb_tooltip(force=True)",
+                      _method_source("_animate_sidebar"))
+        # A row is measured to the rail's edge, and the bubble itself counts as
+        # "still on it" - otherwise reading it would dismiss it.
+        on = _method_source("_sb_pointer_on")
+        self.assertIn("w = min(w, rail.winfo_rootx() + rail.winfo_width() - x)",
+                      on)
+        self.assertIn("for tp in getattr(self, '_sb_popups', [])", on)
+        # The footer's own Leave names its anchor instead of guessing.
+        self.assertIn("lambda e, a=tip_anchor: self._hide_sb_tooltip(a)",
+                      _method_source("_sb_bind_clickable"))
+
+    def test_rail_level_text_starts_past_the_collapsed_rail(self):
+        # The collapsed rail is the clip. A wordmark or group header that starts
+        # before SB_W_COLLAPSED is sliced by its own parent and leaves half a
+        # letter poking out beside the icon column, which reads as "the text is
+        # spilling out of the sidebar".
+        if not _HAS_CTK:
+            self.skipTest("customtkinter not installed")
+        from ui import UITheme
+        self.assertGreaterEqual(UITheme.SB_LABEL_X, UITheme.SB_W_COLLAPSED)
+        self.assertEqual(UITheme.SB_LABEL_X,
+                         UITheme.SB_PAD_X + UITheme.SB_TEXT_X)
+        build = _method_source("_build_sidebar")
+        # Wordmark + group headers live directly in the rail, so they use it...
+        self.assertEqual(build.count("x=UITheme.SB_LABEL_X"), 2)
+        # ...while a row's label is chip-local and keeps the other constant.
+        self.assertIn("tx.place(x=UITheme.SB_TEXT_X, y=0)",
+                      _method_source("_make_nav_row"))
+
+    def test_peek_is_off_by_default_and_armed_by_nav_rows_only(self):
+        # The complaint this default answers: a rail that throws itself open
+        # every time the pointer crosses it. Opt in, and even then only an
+        # actual nav row arms it - the footer chip and the empty stretch under
+        # the list must not.
+        self.assertIn('"sidebar_peek_on_hover": False',
+                      _method_source("_default_prefs"))
+        self.assertIn("self._prefs.get('sidebar_peek_on_hover', False)",
+                      _method_source("__init__"))
+        body = _method_source("_sb_pointer_update")
+        # An x band cannot exclude the footer: its chip sits in the same column
+        # as the icons, so the decision has to come from the derived hover.
+        self.assertNotIn("icons_edge", body)
+        self.assertIn("armed = hover is not None and hover != '__footer__'",
+                      body)
+        self.assertIn(
+            "self._sb_peek_track(inside and (armed or self._sb_peeking))",
+            body)
+
+    def test_a_tooltip_popup_can_never_be_stranded(self):
+        # A mapped borderless popup whose last reference is dropped is stranded:
+        # nothing can withdraw it any more, so it sits next to the rail for the
+        # rest of the session. Every path out of _show_sb_tooltip has to keep
+        # hold of it, or destroy it.
+        show = _method_source("_show_sb_tooltip")
+        self.assertIn("self._drop_sb_popups()", show)
+        popup = _method_source("_sb_popup")
+        self.assertIn("for dead in getattr(self, '_sb_popups', [])", popup)
+        self.assertIn("dead.destroy()", popup)
+        self.assertIn("self._sb_popups = [tp]", popup)
+        # The bubble may be hovered (reading it must not dismiss it), and the
+        # rail stops seeing the pointer the moment the bubble takes it - so the
+        # popup has to dismiss itself, or it outlives its hover over the page.
+        self.assertIn("tp.bind('<Leave>', lambda e: "
+                      "self._hide_sb_tooltip(force=True))", popup)
+        hide = _method_source("_hide_sb_tooltip")
+        self.assertIn("for tp in getattr(self, '_sb_popups', [])", hide)
+        self.assertIn("tp.withdraw()", hide)
+        self.assertIn("_sb_popups", _method_source("__init__"))
+        # Everything that moves the rail under the bubble hides it outright.
+        self.assertEqual(_source().count("_hide_sb_tooltip(force=True)"), 4)
+        # One bubble per row, pinned to the rail's edge: anchoring it to
+        # whichever label the pointer is over made it hop between the icon, the
+        # text and the badge slot as the mouse crossed a row.
+        self.assertIn("self._sb_in_rail(widget)", show)
+        self.assertIn("rail.winfo_rootx() + rail.winfo_width() + 6", show)
+        # Tips stay a name plus its shortcut: a sentence is a 300px box parked
+        # over the page beside the icon.
+        self.assertNotIn("Switch to MP3/MP4 download tools", _source())
+        self.assertIn("self._sb_tips[name], ic, name=name)",
+                      _method_source("_make_nav_row"))
 
 
 if __name__ == "__main__":
