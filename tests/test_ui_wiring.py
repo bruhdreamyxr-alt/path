@@ -963,7 +963,7 @@ class SidebarRailTests(unittest.TestCase):
         # Wordmark + group headers live directly in the rail, so they use it...
         self.assertEqual(build.count("x=UITheme.SB_LABEL_X"), 2)
         # ...while a row's label is chip-local and keeps the other constant.
-        self.assertIn("tx.place(x=UITheme.SB_TEXT_X, y=0)",
+        self.assertIn("tx.place(x=UITheme.SB_TEXT_X, y=1)",
                       _method_source("_make_nav_row"))
 
     def test_peek_is_off_by_default_and_armed_by_nav_rows_only(self):
@@ -1017,6 +1017,52 @@ class SidebarRailTests(unittest.TestCase):
         self.assertNotIn("Switch to MP3/MP4 download tools", _source())
         self.assertIn("self._sb_tips[name], ic, name=name)",
                       _method_source("_make_nav_row"))
+
+    def test_a_row_repaint_cannot_stop_halfway_through_the_chip(self):
+        # CustomTkinter 6 refuses border_color="transparent": it raises from the
+        # middle of CTkFrame.configure() - after the frame has already handed
+        # its new fg_color to every child label. The labels repaint, the frame
+        # does not, so a hovered row became three loose boxes of the new tint
+        # over a chip still wearing the old one, and the row a click just left
+        # kept the chip of the state it lost (the "little boxes and black" a
+        # page switch used to flicker). The rail asked for that exact border
+        # color on every idle, hovered and pressed row, and a bare except
+        # swallowed the raise for as long as the rail existed.
+        repaint = _method_source("_repaint_nav_rows")
+        self.assertIn("border_color=_ring_color(edge, fill, base)", repaint)
+        self.assertNotIn("border_color=edge", repaint)
+        # ...and a failed repaint has to say so, instead of vanishing.
+        self.assertIn('logger.debug("nav row %r repaint failed"', repaint)
+        src = _source()
+        # No surface in the app may ask for a transparent border again.
+        self.assertNotIn('border_color="transparent"', src)
+        self.assertNotIn("border_color='transparent'", src)
+
+    def test_the_border_color_a_surface_gets_is_one_ctk_will_accept(self):
+        # _ring_color is pure on purpose: this is the value CTk parses before it
+        # draws anything, so it can be pinned without a Tk window.
+        from ui import _ring_color
+        self.assertEqual(_ring_color("#aabbcc", "#112233", "#445566"), "#aabbcc")
+        self.assertEqual(_ring_color("transparent", "#112233", "#445566"),
+                         "#112233")
+        self.assertEqual(_ring_color(None, "transparent", "#445566"), "#445566")
+        for fill in ("#112233", "transparent"):
+            for ring in (None, "transparent", ""):
+                self.assertNotEqual(_ring_color(ring, fill, "#445566"),
+                                    "transparent")
+
+    def test_a_rows_labels_leave_the_ring_band_of_its_chip(self):
+        # A CTkLabel paints a rectangle of its own background over whatever sits
+        # under it. Labels the full height of a row therefore ate the selected
+        # row's one-pixel ring wherever they crossed it, and the ring arrived on
+        # screen in dashes. One pixel clear of each edge, and they still sit
+        # dead centre in the row.
+        build = _method_source("_make_nav_row")
+        self.assertEqual(build.count("height=UITheme.SB_ROW_H - 2"), 2)
+        self.assertIn("width=UITheme.SB_ICON_W - 2", build)
+        self.assertIn("ic.place(x=1, y=1)", build)
+        self.assertIn("tx.place(x=UITheme.SB_TEXT_X, y=1)", build)
+        self.assertEqual(build.count("place(x=UITheme.SB_PAD_X, y=y)"), 1)
 
 
 if __name__ == "__main__":

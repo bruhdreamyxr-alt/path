@@ -169,6 +169,23 @@ def _mix(a: str, b: str, t: float) -> str:
         int(round(ca[i] + (cb[i] - ca[i]) * t)) for i in range(3))
 
 
+def _ring_color(ring, fill, base):
+    """A border color CustomTkinter will actually accept.
+
+    CTk 6 refuses a ``border_color`` of "transparent" - it raises ValueError
+    from the middle of ``CTkFrame.configure()``, after the frame has already
+    handed its new ``fg_color`` down to every child label. The children repaint
+    and the frame does not, so a hovered nav row became three loose boxes of
+    the new tint floating over a row still painted the old colour, and the row a
+    click just left kept the chip of the state it lost. A ring is only ever
+    drawn when there is a ``border_width``, so wherever there is no ring the
+    surface's own color stands in as a no-op.
+    """
+    if ring and ring != "transparent":
+        return ring
+    return fill if fill and fill != "transparent" else base
+
+
 # Fragments that betray a machine-generated wall of text inside a dialog
 # message: yt-dlp tracebacks, argparse errors, aria2 and HTTP failures.
 _TRACEBACK_MARKERS = ("Traceback (most recent call last)", 'File "',
@@ -4118,13 +4135,22 @@ class UniversalAudioStudio(ctk.CTk):
             border_width=0,
         )
         row.place(x=UITheme.SB_PAD_X, y=y)
-        ic = ctk.CTkLabel(row, text=icon, width=UITheme.SB_ICON_W,
-                          height=UITheme.SB_ROW_H,
+        # The icon column never moves, and each label stops a pixel short of the
+        # chip's edges: a CTkLabel paints a rectangle of its own background over
+        # whatever is under it, so labels that span the row edge to edge bit the
+        # selected row's hairline ring wherever they crossed and it arrived in
+        # dashes. The icon box gives up a pixel either side of its 30px column,
+        # which keeps the glyph dead centre in it - and in the collapsed rail,
+        # whose width is exactly that column plus the padding. The word label is
+        # two pixels shorter for the same reason at the top and bottom, and is
+        # still centred (1 + (38 - 2) / 2 == 38 / 2).
+        ic = ctk.CTkLabel(row, text=icon, width=UITheme.SB_ICON_W - 2,
+                          height=UITheme.SB_ROW_H - 2,
                           font=UITheme.F(15), cursor="hand2")
-        ic.place(x=0, y=0)
+        ic.place(x=1, y=1)
         tx = ctk.CTkLabel(row, text=label, font=UITheme.F(12), anchor="w",
-                          cursor="hand2", height=UITheme.SB_ROW_H)
-        tx.place(x=UITheme.SB_TEXT_X, y=0)
+                          cursor="hand2", height=UITheme.SB_ROW_H - 2)
+        tx.place(x=UITheme.SB_TEXT_X, y=1)
         hint = ctk.CTkLabel(row, text=self._SB_KEYS.get(name, ""),
                             width=22, height=18, corner_radius=9,
                             font=UITheme.F(9, "bold"))
@@ -4446,11 +4472,12 @@ class UniversalAudioStudio(ctk.CTk):
             elif name == hover:
                 fill, icon_c, label_c = hover_fill, accent, text_c
             try:
-                row.configure(fg_color=fill, border_width=bw, border_color=edge)
+                row.configure(fg_color=fill, border_width=bw,
+                              border_color=_ring_color(edge, fill, base))
                 self._sb_icons[name].configure(text_color=icon_c)
                 self._sb_texts[name].configure(text_color=label_c)
             except Exception:
-                pass
+                logger.debug("nav row %r repaint failed", name, exc_info=True)
             self._repaint_nav_hint(name, base, accent, text_c, sub_c)
 
         # Brand tile, footer chip, hairline, section headers.
@@ -5019,19 +5046,8 @@ class UniversalAudioStudio(ctk.CTk):
                 except Exception:
                     pass
 
-        # Swatch selection ring
-        self._update_theme_swatches()
-
-    def _update_theme_swatches(self):
-        for tname, sw in getattr(self, '_swatches', {}).items():
-            try:
-                selected = (tname == self._color_theme_name)
-                sw.configure(
-                    border_width=2 if selected else 0,
-                    border_color=COLOR_THEMES[tname]['text'] if selected else 'transparent',
-                )
-            except Exception:
-                pass
+        # Swatch selection ring: the clickable swatch dots are gone (theme
+        # picking lives in the dropdown now), so there is nothing left to ring.
 
     def load_background_gif(self):
         if Image is None:
