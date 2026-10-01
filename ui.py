@@ -148,6 +148,27 @@ def _on_color(bg: str, *candidates: str) -> str:
     return best
 
 
+# How far a photo or GIF background is pulled toward the palette's own
+# background colour before it is shown. CustomTkinter surfaces have no alpha
+# channel, so a "translucent scrim" cannot be a widget - it has to be baked
+# into the picture. Half way is enough to stop a white sky landing under a
+# caption while leaving the image recognisable.
+_BG_SCRIM = 0.5
+
+
+def _scrim_frame(frame, color):
+    """Blend one GIF frame toward *color* so text stays readable over it."""
+    if Image is None or frame is None:
+        return frame
+    try:
+        overlay = Image.new("RGB", frame.size, str(color))
+        base = frame.convert("RGB")
+        return Image.blend(base, overlay, _BG_SCRIM)
+    except Exception:
+        logger.debug("Scrimming a background frame failed", exc_info=True)
+        return frame
+
+
 def _mix(a: str, b: str, t: float) -> str:
     """Blend two '#rrggbb' colors; ``t``=0 keeps ``a``, ``t``=1 gives ``b``.
 
@@ -1228,6 +1249,49 @@ class UniversalAudioStudio(ctk.CTk):
         except Exception:
             pass
 
+    def _bg_scrim_color(self) -> str:
+        """The tone a photo background is pulled toward, from the live palette.
+
+        The window's own background is what the surrounding text is drawn in, so
+        blending the picture toward that tone is what makes the two agree. On a
+        light palette it is mixed toward white and on a dark one toward black,
+        so the image recedes instead of glowing through the chrome.
+        """
+        pal = getattr(self, "_palette", {}) or {}
+        base = pal.get("bg", UITheme.SURFACE_BG)
+        dark = _rel_luminance(base) < 0.45
+        return _mix(base, "#000000", 0.55) if dark else _mix(base, "#ffffff", 0.55)
+
+    def _rescrim_background(self) -> bool:
+        """Re-blend a live GIF after a palette change, so its scrim still matches.
+
+        The scrim is baked into the frames, so a new palette means the old bake
+        is the wrong colour - and it would be wrong by exactly the amount the
+        rest of the window just moved.
+        """
+        source = getattr(self, "_bg_source", "")
+        if not (source and getattr(self, "bg_enabled", False)):
+            return False
+        if not os.path.exists(source):
+            return False
+        try:
+            self.update_idletasks()
+            size = (max(self.winfo_width(), 520), max(self.winfo_height(), 520))
+            scrim = self._bg_scrim_color()
+            frames = []
+            for frame in ImageSequence.Iterator(Image.open(source)):
+                f = _scrim_frame(frame, scrim)
+                frames.append(ctk.CTkImage(light_image=f, dark_image=f, size=size))
+            if not frames:
+                return False
+            self.bg_frames = frames
+            self.bg_frame_index = 0
+            self.bg_label.configure(image=self.bg_frames[0])
+            return True
+        except Exception:
+            logger.debug("Re-blending the background failed", exc_info=True)
+            return False
+
     def _apply_prefs_to_background(self) -> None:
 
         style = str(self._prefs.get("background_style", "gif") or "gif").lower()
@@ -1261,13 +1325,15 @@ class UniversalAudioStudio(ctk.CTk):
                 size = (w, h)
 
                 frames = []
+                scrim = self._bg_scrim_color()
                 if ImageSequence is not None:
                     for frame in ImageSequence.Iterator(pil_img):
-                        f = frame.convert('RGBA')
+                        f = _scrim_frame(frame, scrim)
                         ctk_img = ctk.CTkImage(light_image=f, dark_image=f, size=size)
                         frames.append(ctk_img)
 
                 if frames:
+                    self._bg_source = gif_path
                     self.bg_frames = frames
                     self.bg_frame_index = 0
                     self.bg_enabled = True
@@ -5932,6 +5998,10 @@ class UniversalAudioStudio(ctk.CTk):
         # tkinter.Menu), so they are repainted separately - without this the
         # Performance page's background stayed on the old palette.
         self._style_composites(pal)
+        # A photo background's scrim is baked into its frames, so a palette
+        # switch has to re-blend it: left alone it would sit a whole theme
+        # behind, which is the one thing the scrim exists to prevent.
+        self._rescrim_background()
         # Button icons are pictures, so they do not re-tint themselves the way a
         # colour option does: each one is redrawn in whatever ink its button's
         # new label colour resolved to.
@@ -5976,9 +6046,10 @@ class UniversalAudioStudio(ctk.CTk):
 
         frames = []
         try:
+            scrim = self._bg_scrim_color()
             if ImageSequence is not None:
                 for frame in ImageSequence.Iterator(pil_img):
-                    f = frame.convert('RGBA')
+                    f = _scrim_frame(frame, scrim)
                     ctk_img = ctk.CTkImage(light_image=f, dark_image=f, size=size)
                     frames.append(ctk_img)
         except Exception as e:
@@ -5989,6 +6060,7 @@ class UniversalAudioStudio(ctk.CTk):
             self._show_error_dialog("Background Error", "Could not load frames from the selected GIF.")
             return
 
+        self._bg_source = gif_path
         self.bg_frames = frames
         self.bg_frame_index = 0
         self.bg_enabled = True
@@ -6003,6 +6075,7 @@ class UniversalAudioStudio(ctk.CTk):
             self.bg_animation_id = None
         self.bg_frames = []
         self.bg_enabled = False
+        self._bg_source = ""
         self.bg_frame_index = 0
         self.bg_label.configure(image=None)
         self.bg_status.configure(text="No animated background loaded.", text_color="#95a5a6")

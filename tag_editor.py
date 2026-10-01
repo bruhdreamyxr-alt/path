@@ -41,6 +41,15 @@ except ImportError:
 
 
 class TagEditorDialog(ctk.CTkToplevel):
+    """The one place tags are edited, dressed in the app's own palette.
+
+    This used to be its own little app: hard-coded #2ecc71, a fixed Segoe UI
+    stack and CustomTkinter's default greys, so opening it dropped the user out
+    of the theme they had chosen. Everything below is taken from the master's
+    palette, and the window is a plain card with the same radius and hairline as
+    every dialog in the app.
+    """
+
     def __init__(self, master, filepath, on_save=None):
         super().__init__(master)
         self.filepath = filepath
@@ -48,44 +57,98 @@ class TagEditorDialog(ctk.CTkToplevel):
         self._cover_data = None
         self._cover_mime = None
 
+        try:
+            from ui import UITheme, _on_color
+        except Exception:                       # pragma: no cover - defensive
+            UITheme = _on_color = None
+        self._theme = UITheme
+
+        pal = dict(getattr(master, "_palette", None) or {})
+        self._pal = pal
+        bg = pal.get("bg", "#1e1e24")
+        surface = pal.get("surface", "#2b2b2b")
+        text = pal.get("text", "#ecf0f1")
+        sub = pal.get("sub", "#95a5a6")
+        accent = pal.get("accent", "#3498db")
+        accent_hover = pal.get("accent_hover", "#2980b9")
+        self._accent, self._text = accent, text
+        radius = getattr(UITheme, "RADIUS_LG", 14) if UITheme else 14
+        radius_md = getattr(UITheme, "RADIUS_MD", 10) if UITheme else 10
+        field_h = getattr(UITheme, "H_FIELD", 32) if UITheme else 32
+        border = getattr(UITheme, "BORDER_W", 1) if UITheme else 1
+        font = UITheme.F(12) if UITheme else ("Segoe UI", 12)
+
         self.title(f"Edit Tags - {os.path.basename(filepath)[:50]}")
-        self.geometry("420x560")
+        self.geometry("440x580")
         self.resizable(False, False)
         self.attributes('-topmost', True)
         self.grab_set()
+        try:
+            self.configure(fg_color=bg)
+        except Exception:
+            pass
 
         tags = self._read_tags()
-        main = ctk.CTkFrame(self, fg_color="transparent")
-        main.pack(fill="both", expand=True, padx=16, pady=(12, 8))
+        main = ctk.CTkFrame(self, fg_color=surface, corner_radius=radius,
+                           border_width=border,
+                           border_color=pal.get("hover", "#34495e"))
+        main.pack(fill="both", expand=True, padx=18, pady=18)
 
         ctk.CTkLabel(main, text=f"Editing: {os.path.basename(filepath)[:50]}",
-                     font=("Segoe UI", 11, "bold"), text_color="#2ecc71").pack(anchor="w", pady=(0, 10))
+                     font=UITheme.F(12, "bold") if UITheme else None,
+                     text_color=accent).pack(anchor="w", pady=(0, 2))
+        ctk.CTkLabel(main, text="These are the tags stored inside the file.",
+                     font=UITheme.F(10) if UITheme else None,
+                     text_color=sub).pack(anchor="w", pady=(0, 10))
 
         self._entries = {}
         for label, key in [("Title:", "title"), ("Artist:", "artist"),
-                           ("Album:", "album"), ("Genre:", "genre"), ("Year:", "year")]:
-            ctk.CTkLabel(main, text=label, font=("Segoe UI", 12)).pack(anchor="w", pady=(4, 0))
-            e = ctk.CTkEntry(main, width=380, height=30)
+                           ("Album:", "album"), ("Genre:", "genre"),
+                           ("Year:", "year")]:
+            ctk.CTkLabel(main, text=label, font=font,
+                         text_color=text).pack(anchor="w", pady=(4, 0))
+            e = ctk.CTkEntry(main, width=380, height=field_h,
+                             corner_radius=radius_md,
+                             fg_color=bg, border_width=border,
+                             border_color=pal.get("hover", "#34495e"),
+                             text_color=text)
             e.pack(fill="x", pady=(0, 4))
             e.insert(0, tags.get(key, ""))
             self._entries[key] = e
 
         cover_frame = ctk.CTkFrame(main, fg_color="transparent")
         cover_frame.pack(fill="x", pady=(8, 4))
-        ctk.CTkLabel(cover_frame, text="Cover Art:", font=("Segoe UI", 12)).pack(anchor="w")
-        ctk.CTkButton(cover_frame, text="Choose Image...", width=180, height=28,
-                       command=self._choose_cover).pack(anchor="w", pady=(2, 0))
+        ctk.CTkLabel(cover_frame, text="Cover Art:", font=font,
+                     text_color=text).pack(anchor="w")
+        btn_cover = ctk.CTkButton(cover_frame, text="Choose Image...",
+                                  width=180, height=30, corner_radius=radius_md,
+                                  fg_color=pal.get("sidebar_active", "#2c3e50"),
+                                  hover_color=pal.get("hover", "#34495e"),
+                                  text_color=_on_color(
+                                      pal.get("sidebar_active", "#2c3e50"),
+                                      text, bg) if _on_color else text,
+                                  command=self._choose_cover)
+        btn_cover.pack(anchor="w", pady=(4, 0))
         self.cover_lbl = ctk.CTkLabel(cover_frame, text="No new image selected",
-                                       font=("Segoe UI", 10), text_color="#95a5a6")
+                                      font=UITheme.F(10) if UITheme else None,
+                                      text_color=sub)
         self.cover_lbl.pack(anchor="w")
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=16, pady=(0, 12))
-        ctk.CTkButton(btn_frame, text="Save Tags", width=160, height=36,
-                      fg_color="#2ecc71", hover_color="#27ae60",
-                      command=self._save).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_frame, text="Cancel", width=100, height=36,
-                      fg_color="#636e72", command=self.destroy).pack(side="left")
+        btn_frame.pack(fill="x", padx=18, pady=(0, 18))
+        save = ctk.CTkButton(btn_frame, text="Save Tags", width=170, height=36,
+                             corner_radius=radius_md, fg_color=accent,
+                             hover_color=accent_hover,
+                             text_color=_on_color(accent, text, bg)
+                             if _on_color else "#ffffff",
+                             command=self._save)
+        save.pack(side="left", padx=(0, 8))
+        cancel = ctk.CTkButton(btn_frame, text="Cancel", width=110, height=36,
+                               corner_radius=radius_md,
+                               fg_color=pal.get("sidebar_active", "#2c3e50"),
+                               hover_color=pal.get("hover", "#34495e"),
+                               text_color=text, command=self.destroy)
+        cancel.pack(side="left")
 
     def _read_tags(self):
         result = {"title": "", "artist": "", "album": "", "genre": "", "year": ""}
@@ -122,7 +185,8 @@ class TagEditorDialog(ctk.CTkToplevel):
         if path and os.path.exists(path):
             with open(path, 'rb') as f: self._cover_data = f.read()
             self._cover_mime = 'image/png' if path.lower().endswith('.png') else 'image/jpeg'
-            self.cover_lbl.configure(text=os.path.basename(path), text_color="#2ecc71")
+            self.cover_lbl.configure(text=os.path.basename(path),
+                                     text_color=self._accent)
 
 
     def _save(self):
