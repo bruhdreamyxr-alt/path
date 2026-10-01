@@ -29,6 +29,8 @@ OutputDir=.
 OutputBaseFilename={#OutputBase}
 Compression=lzma2
 SolidCompression=yes
+; The installer's own icon, same asset the .exe and the app window use.
+SetupIconFile=assets\tune_lab.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -39,5 +41,5 @@ Source: "dist\UniversalAudioStudio\_internal\*"; DestDir: "{app}\_internal"; Fla
 Source: "dist\updater_cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "assets\tune_lab.ico"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "assets\tune_lab.ico"

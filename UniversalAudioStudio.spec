@@ -35,6 +35,10 @@ a = Analysis(
         ('ffprobe.exe', '.'),
         ('yt-dlp.exe', '.'),
         (_UPDATE_HELPER, '.'),
+        # The app's own icon, next to the executable so ui.py can find it in a
+        # frozen build (sys._MEIPASS). The .exe gets its icon from icon= below.
+        ('assets/tune_lab.png', '.'),
+        ('assets/tune_lab.ico', '.'),
     ] + _ARIA2_DATAS + _FFPLAY_DATAS,
     hiddenimports=[
         'yt_dlp',
@@ -77,6 +81,10 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # The app icon, so the .exe in Explorer, on the taskbar and in Alt-Tab is
+    # TuneLab and not PyInstaller's default. (The macOS bundle keeps its own
+    # .icns, so this spec stays Windows-only.)
+    icon='assets/tune_lab.ico',
 )
 coll = COLLECT(
     exe,

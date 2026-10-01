@@ -1016,6 +1016,52 @@ class UniversalAudioStudio(ctk.CTk):
         except Exception:
             pass
 
+    def _apply_app_icon(self) -> None:
+        """Give the window TuneLab's own icon.
+
+        Tk's default is the feather, and that is what the taskbar, the title bar
+        and Alt-Tab show until something replaces it. The asset sits next to the
+        source in a checkout and in the bundle root when frozen (the PyInstaller
+        spec bundles it), so one lookup covers both.
+
+        The PNG goes through iconphoto, which every Tk honours; the .ico is set
+        too on Windows, where the taskbar entry prefers it. Neither is worth a
+        dialog at startup, so both are best effort.
+        """
+        here = os.path.dirname(os.path.abspath(__file__))
+        # Frozen copies bundle the assets next to the executable (sys._MEIPASS);
+        # a checkout has them under assets/. Both are one lookup away.
+        roots = [getattr(sys, "_MEIPASS", None), here,
+                 os.path.join(here, "assets")]
+
+        def _find(name: str) -> str | None:
+            for root in roots:
+                if not root:
+                    continue
+                path = os.path.join(root, name)
+                if os.path.isfile(path):
+                    return path
+            return None
+
+        png = _find("tune_lab.png")
+        ico = _find("tune_lab.ico")
+        # Windows gets the .ico: it is the format the shell already understands,
+        # and Tk's own photo->HICON conversion renders the PNG into the title
+        # bar's slot stretched. Everywhere else (macOS, Linux) uses the PNG,
+        # which is the only thing iconphoto reads.
+        if sys.platform == "win32" and ico:
+            try:
+                self.iconbitmap(ico)
+            except Exception:
+                logger.debug("iconbitmap failed", exc_info=True)
+        elif png:
+            try:
+                photo = tk.PhotoImage(file=png)
+                self.iconphoto(True, photo)
+                self._app_icon = photo      # or the image is collected away
+            except Exception:
+                logger.debug("iconphoto failed", exc_info=True)
+
     def _disable_maximize(self, disable: bool = True) -> None:
         """On Windows, remove the maximize box and thick frame to prevent fullscreen/maximize.
 
@@ -1178,6 +1224,7 @@ class UniversalAudioStudio(ctk.CTk):
         self._last_dl_was_video: bool = False
 
         self.title("TuneLab")
+        self._apply_app_icon()
         # Let packed widgets determine natural size; no fixed geometry.
         self.minsize(800, 680)
 

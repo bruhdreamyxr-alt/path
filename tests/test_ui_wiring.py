@@ -1228,6 +1228,43 @@ class RailIconTests(unittest.TestCase):
                       _method_source("_sb_set_footer_word"))
 
 
+class AppIconTests(unittest.TestCase):
+    """The window, the .exe and the shortcuts all wear the same mark."""
+
+    def test_the_assets_are_in_the_tree(self):
+        for name in ("tune_lab.png", "tune_lab.ico"):
+            path = _REPO / "assets" / name
+            self.assertTrue(path.is_file(), f"{name} is missing")
+
+    def test_the_mark_is_not_drawn_twice(self):
+        # The generator reads the rail's own geometry, so the app icon and the
+        # brand tile cannot drift apart the way two hand-drawn copies would.
+        gen = (_REPO / "tools" / "make_app_icon.py").read_text(encoding="utf-8")
+        self.assertIn("_icon_shapes", gen)
+        self.assertIn('"note"', gen)
+        self.assertIn("LANCZOS", gen)          # supersampled, then downsampled
+
+    def test_the_window_takes_the_native_format_for_its_platform(self):
+        body = _method_source("_apply_app_icon")
+        # Windows renders an iconphoto through Tk's own conversion, which comes
+        # out stretched; the .ico is what the shell understands there.
+        self.assertIn('sys.platform == "win32"', body)
+        self.assertIn("iconbitmap", body)
+        self.assertIn("iconphoto", body)
+        self.assertIn("_MEIPASS", body)        # a frozen build bundles them
+        self.assertIn("self._apply_app_icon()", _source())
+        # The PhotoImage has to be kept: a collected image is a blank icon.
+        self.assertIn("self._app_icon = photo", body)
+
+    def test_the_packaging_uses_the_same_asset(self):
+        spec = (_REPO / "UniversalAudioStudio.spec").read_text(encoding="utf-8")
+        self.assertIn("icon='assets/tune_lab.ico'", spec)
+        self.assertIn("('assets/tune_lab.png', '.')", spec)
+        iss = (_REPO / "installer_200.iss").read_text(encoding="utf-8")
+        self.assertIn("SetupIconFile=assets\\tune_lab.ico", iss)
+        self.assertIn('IconFilename: "assets\\tune_lab.ico"', iss)
+
+
 class FormControlThemeTests(unittest.TestCase):
     """Checkboxes, sliders and bars follow the palette, by type not by name."""
 
