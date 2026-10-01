@@ -46,11 +46,10 @@ if TYPE_CHECKING:
 
 
 try:
-    from PIL import Image, ImageDraw, ImageSequence
+    from PIL import Image, ImageDraw
 except Exception:
     Image = None
     ImageDraw = None
-    ImageSequence = None
 
 # Heavy imports deferred until actually needed
 sd = None
@@ -146,27 +145,6 @@ def _on_color(bg: str, *candidates: str) -> str:
         if ratio > best_ratio:
             best, best_ratio = cand, ratio
     return best
-
-
-# How far a photo or GIF background is pulled toward the palette's own
-# background colour before it is shown. CustomTkinter surfaces have no alpha
-# channel, so a "translucent scrim" cannot be a widget - it has to be baked
-# into the picture. Half way is enough to stop a white sky landing under a
-# caption while leaving the image recognisable.
-_BG_SCRIM = 0.5
-
-
-def _scrim_frame(frame, color):
-    """Blend one GIF frame toward *color* so text stays readable over it."""
-    if Image is None or frame is None:
-        return frame
-    try:
-        overlay = Image.new("RGB", frame.size, str(color))
-        base = frame.convert("RGB")
-        return Image.blend(base, overlay, _BG_SCRIM)
-    except Exception:
-        logger.debug("Scrimming a background frame failed", exc_info=True)
-        return frame
 
 
 def _mix(a: str, b: str, t: float) -> str:
@@ -1012,9 +990,6 @@ class UniversalAudioStudio(ctk.CTk):
             "compact_enabled": False,
             "opacity_enabled": False,
             "opacity_alpha": 1.0,
-            "background_style": "gif",  # none | gif | solid
-            "background_gif_path": "",
-            "background_solid_color": "#2b2b2b",
             "font_scale": 1.0,
             "padding_scale": 1.0,
             "disable_maximize": True,
@@ -1249,105 +1224,6 @@ class UniversalAudioStudio(ctk.CTk):
         except Exception:
             pass
 
-    def _bg_scrim_color(self) -> str:
-        """The tone a photo background is pulled toward, from the live palette.
-
-        The window's own background is what the surrounding text is drawn in, so
-        blending the picture toward that tone is what makes the two agree. On a
-        light palette it is mixed toward white and on a dark one toward black,
-        so the image recedes instead of glowing through the chrome.
-        """
-        pal = getattr(self, "_palette", {}) or {}
-        base = pal.get("bg", UITheme.SURFACE_BG)
-        dark = _rel_luminance(base) < 0.45
-        return _mix(base, "#000000", 0.55) if dark else _mix(base, "#ffffff", 0.55)
-
-    def _rescrim_background(self) -> bool:
-        """Re-blend a live GIF after a palette change, so its scrim still matches.
-
-        The scrim is baked into the frames, so a new palette means the old bake
-        is the wrong colour - and it would be wrong by exactly the amount the
-        rest of the window just moved.
-        """
-        source = getattr(self, "_bg_source", "")
-        if not (source and getattr(self, "bg_enabled", False)):
-            return False
-        if not os.path.exists(source):
-            return False
-        try:
-            self.update_idletasks()
-            size = (max(self.winfo_width(), 520), max(self.winfo_height(), 520))
-            scrim = self._bg_scrim_color()
-            frames = []
-            for frame in ImageSequence.Iterator(Image.open(source)):
-                f = _scrim_frame(frame, scrim)
-                frames.append(ctk.CTkImage(light_image=f, dark_image=f, size=size))
-            if not frames:
-                return False
-            self.bg_frames = frames
-            self.bg_frame_index = 0
-            self.bg_label.configure(image=self.bg_frames[0])
-            return True
-        except Exception:
-            logger.debug("Re-blending the background failed", exc_info=True)
-            return False
-
-    def _apply_prefs_to_background(self) -> None:
-
-        style = str(self._prefs.get("background_style", "gif") or "gif").lower()
-        gif_path = str(self._prefs.get("background_gif_path", "") or "")
-        solid_color = str(self._prefs.get("background_solid_color", UITheme.SURFACE_BG) or UITheme.SURFACE_BG)
-
-        if style == "none":
-            self.clear_background()
-            return
-
-        if style == "solid":
-            self.clear_background()
-            try:
-                # Set background label color by using CTkLabel's bg via place.
-                self.bg_label.configure(text="", fg_color=solid_color)  # type: ignore[arg-type]
-                self.bg_label.lift()
-            except Exception:
-                pass
-            return
-
-        # Default: GIF
-        if gif_path and os.path.exists(gif_path):
-            try:
-                # Load GIF frames without opening a dialog.
-                if Image is None:
-                    return
-                pil_img = Image.open(gif_path)
-                self.update_idletasks()
-                w = max(self.winfo_width(), 520)
-                h = max(self.winfo_height(), 520)
-                size = (w, h)
-
-                frames = []
-                scrim = self._bg_scrim_color()
-                if ImageSequence is not None:
-                    for frame in ImageSequence.Iterator(pil_img):
-                        f = _scrim_frame(frame, scrim)
-                        ctk_img = ctk.CTkImage(light_image=f, dark_image=f, size=size)
-                        frames.append(ctk_img)
-
-                if frames:
-                    self._bg_source = gif_path
-                    self.bg_frames = frames
-                    self.bg_frame_index = 0
-                    self.bg_enabled = True
-                    self.bg_status.configure(text=os.path.basename(gif_path), text_color=UITheme.COLOR_SUCCESS)
-                    self.bg_label.configure(image=self.bg_frames[0])
-                    self.bg_label.lower()
-                    self.start_background_animation()
-            except Exception:
-                # If GIF fails to load, just clear.
-                self.clear_background()
-        else:
-            # Missing GIF path => clear
-            self.clear_background()
-
     def __init__(self):
         # Thread-dispatch state must exist BEFORE super().__init__() so the
         # overridden after() (below) is safe even while CTk builds the widget.
@@ -1535,15 +1411,6 @@ class UniversalAudioStudio(ctk.CTk):
         self._queue_manager = None
         self._queue_initialized = False
 
-        self.bg_label = ctk.CTkLabel(self, text="", corner_radius=0)
-        self.bg_label.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.bg_label.lower()
-
-        self.bg_frames = []
-        self.bg_frame_index = 0
-        self.bg_animation_id = None
-        self.bg_enabled = False
-
         # Motion + rail preferences are read before any view is built: the
         # "Sidebar & motion" card seeds its widgets from these values.
         try:
@@ -1600,13 +1467,11 @@ class UniversalAudioStudio(ctk.CTk):
         # Apply saved runtime preferences to controls + visuals
         # (controls are created in build_customization_view / apply_* methods)
         self._apply_prefs_to_window()
-        self._apply_prefs_to_background()
 
         # Auto-check for app updates (non-blocking, shows banner if available)
         self.after(3000, self._check_updates_on_startup)
 
-        # Ensure the whole window background matches solid style preference
-        # and apply the saved Monkeytype-style color theme to every widget
+        # Apply the saved color theme to every widget
         self.apply_color_theme(self._color_theme_name)
 
         # Collapse/expand shortcut (like VS Code's side bar)
@@ -3988,7 +3853,7 @@ class UniversalAudioStudio(ctk.CTk):
         theme_card = self._settings_card(self.tab_customization, "Theme")
         theme_card.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 8))
         ctk.CTkLabel(
-            theme_card, text="Color theme (Monkeytype-style):",
+            theme_card, text="Color theme:",
             font=UITheme.F(12), anchor="w",
         ).pack(fill="x", padx=16, pady=(0, 4))
         self.theme_menu = ctk.CTkOptionMenu(
@@ -4009,34 +3874,16 @@ class UniversalAudioStudio(ctk.CTk):
         # Theme selection lives in the dropdown above only (the duplicate row
         # of clickable swatch dots was removed as redundant UI).
 
-        bg_card = self._settings_card(self.tab_customization, "Background")
-        bg_card.pack(fill="x", padx=UITheme.PAD_X, pady=(0, 8))
-
-        self.gif_button = ctk.CTkButton(
-            bg_card,
-            text="Load Animated GIF Background",
-            width=260,
-            command=self.load_background_gif
-        )
-        self.gif_button.pack(anchor="w", padx=16, pady=(4, 8))
-        self._style_button(self.gif_button, "secondary")
-
-        self.clear_bg_button = ctk.CTkButton(
-            bg_card,
-            text="Clear Background",
-            width=260,
-            command=self.clear_background
-        )
-        self.clear_bg_button.pack(anchor="w", padx=16, pady=(0, 6))
-        self._style_button(self.clear_bg_button, "danger")
-
+        # There is no Background card here any more. A photo or animated GIF
+        # sat behind every page, where it was visible only in the margins
+        # between cards and could only ever cost legibility there - and it cost
+        # a full settings card, a file dialog, an animation timer and a scrim
+        # baked into every frame to maintain. The palettes carry the whole
+        # appearance now.
+        #
         # Cache-clearing moved to the Performance tab (it is maintenance,
         # not appearance).
 
-        self.bg_status = ctk.CTkLabel(
-            bg_card, text="No animated background loaded.",
-            font=UITheme.F(12), anchor="w", text_color="#95a5a6")
-        self.bg_status.pack(fill="x", padx=16, pady=(0, 12))
         # Rail behaviour. The collapse state, hover-peek and motion lengths
         # are appearance choices, so they sit here rather than in Performance.
         rail_card = self._settings_card(self.tab_customization,
@@ -4297,7 +4144,7 @@ class UniversalAudioStudio(ctk.CTk):
             'queue': 'Download Queue',
             'history': 'Download History',
             'studio': 'Slowed + Reverb Studio',
-            'settings': 'Appearance & Background',
+            'settings': 'Appearance',
             'performance': 'Performance Settings',
         }
         self.title_lbl.configure(text=page_titles.get(name, ''))
@@ -5998,10 +5845,6 @@ class UniversalAudioStudio(ctk.CTk):
         # tkinter.Menu), so they are repainted separately - without this the
         # Performance page's background stayed on the old palette.
         self._style_composites(pal)
-        # A photo background's scrim is baked into its frames, so a palette
-        # switch has to re-blend it: left alone it would sit a whole theme
-        # behind, which is the one thing the scrim exists to prevent.
-        self._rescrim_background()
         # Button icons are pictures, so they do not re-tint themselves the way a
         # colour option does: each one is redrawn in whatever ink its button's
         # new label colour resolved to.
@@ -6020,65 +5863,6 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Swatch selection ring: the clickable swatch dots are gone (theme
         # picking lives in the dropdown now), so there is nothing left to ring.
-
-    def load_background_gif(self):
-        if Image is None:
-            self._show_error_dialog("Dependency Missing", "Pillow is required to load GIF backgrounds. Install with: pip install pillow")
-            return
-
-        gif_path = filedialog.askopenfilename(title="Select Animated GIF", filetypes=[("GIF Animation", "*.gif")])
-        if not gif_path:
-            return
-
-        try:
-            pil_img = Image.open(gif_path)
-        except Exception as e:
-            self._show_error_dialog("Background Error", f"Could not open GIF:\n{e}")
-            return
-
-        try:
-            self.update_idletasks()
-            w = max(self.winfo_width(), 520)
-            h = max(self.winfo_height(), 520)
-            size = (w, h)
-        except Exception:
-            size = (520, 520)
-
-        frames = []
-        try:
-            scrim = self._bg_scrim_color()
-            if ImageSequence is not None:
-                for frame in ImageSequence.Iterator(pil_img):
-                    f = _scrim_frame(frame, scrim)
-                    ctk_img = ctk.CTkImage(light_image=f, dark_image=f, size=size)
-                    frames.append(ctk_img)
-        except Exception as e:
-            self._show_error_dialog("Background Error", f"Failed processing GIF frames:\n{e}")
-            return
-
-        if not frames:
-            self._show_error_dialog("Background Error", "Could not load frames from the selected GIF.")
-            return
-
-        self._bg_source = gif_path
-        self.bg_frames = frames
-        self.bg_frame_index = 0
-        self.bg_enabled = True
-        self.bg_status.configure(text=os.path.basename(gif_path), text_color="#2ecc71")
-        self.bg_label.configure(image=self.bg_frames[0])
-        self.bg_label.lower()
-        self.start_background_animation()
-
-    def clear_background(self):
-        if self.bg_animation_id:
-            self.after_cancel(self.bg_animation_id)
-            self.bg_animation_id = None
-        self.bg_frames = []
-        self.bg_enabled = False
-        self._bg_source = ""
-        self.bg_frame_index = 0
-        self.bg_label.configure(image=None)
-        self.bg_status.configure(text="No animated background loaded.", text_color="#95a5a6")
 
     def clear_download_cache(self):
         # Run in a worker thread because filesystem cleanup can be slow
@@ -6134,18 +5918,6 @@ class UniversalAudioStudio(ctk.CTk):
                 self.after(0, lambda: self.clear_cache_btn.configure(state="normal"))
 
         self._start_worker(worker)
-
-    def start_background_animation(self):
-        if not self.bg_enabled or not self.bg_frames:
-            return
-
-        self.bg_label.configure(image=self.bg_frames[self.bg_frame_index])
-        self.bg_frame_index = (self.bg_frame_index + 1) % len(self.bg_frames)
-        # NOTE: deliberately no per-frame .lower() here. Stacking order
-        # never changes between animation ticks, and re-lowering a mapped
-        # widget every 100ms adds restack churn that amplified the click
-        # flicker. The load paths already push the label behind everything.
-        self.bg_animation_id = self.after(100, self.start_background_animation)
 
     def play_preview(self):
         if not self.studio_file_path:
@@ -6382,19 +6154,5 @@ if __name__ == "__main__":
             logger.debug("Single-instance check failed", exc_info=True)
 
     app = UniversalAudioStudio()
-
-    # One-time DWM tweak: disallow window transition animations so Windows
-    # cannot fade/flash the whole surface during heavy repaint bursts
-    # (e.g. switching pages over an animated GIF background).
-    try:
-        import ctypes
-        _hwnd = int(app.winfo_id())
-        _val = ctypes.c_int(1)  # TRUE
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            _hwnd, 3, ctypes.byref(_val), ctypes.sizeof(_val)  # 3 = DWMWA_TRANSITIONS_FORCEDISALLOWED
-        )
-    except Exception:
-        pass
-
     app.mainloop()
 

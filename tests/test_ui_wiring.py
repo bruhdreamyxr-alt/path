@@ -1420,40 +1420,6 @@ class TagEditorThemeTests(unittest.TestCase):
         self.assertIn("inside the file", body)
 
 
-class BackgroundScrimTests(unittest.TestCase):
-    """A photo behind the text has to stay legible, and CustomTkinter has no alpha."""
-
-    def test_frames_are_blended_because_widgets_cannot_be_translucent(self):
-        import inspect
-        import ui
-        src = inspect.getsource(ui._scrim_frame)
-        self.assertIn("Image.blend", src)
-        self.assertGreater(ui._BG_SCRIM, 0.0)
-
-    def test_the_scrim_follows_the_palette_not_the_picture(self):
-        import ui
-        app = ui.UniversalAudioStudio()
-        try:
-            app.apply_color_theme("TuneLab Dark")
-            dark = app._bg_scrim_color()
-            app.apply_color_theme("Gruvbox Light")
-            light = app._bg_scrim_color()
-            self.assertNotEqual(dark, light)
-            # A near-white image has to end up dark under a dark palette,
-            # otherwise a caption lands on a white sky.
-            scrimmed = ui._scrim_frame(
-                ui.Image.new("RGB", (4, 4), (250, 250, 250)), dark)
-            r, g, b = scrimmed.getpixel((0, 0))
-            self.assertLess(max(r, g, b), 200)
-        finally:
-            app.destroy()
-
-    def test_a_palette_switch_reblends_a_live_background(self):
-        src = open("ui.py", encoding="utf-8").read()
-        theme = src[src.index("def apply_color_theme"):]
-        self.assertIn("self._rescrim_background()", theme)
-
-
 class CompositeWidgetThemeTests(unittest.TestCase):
     """Scroll wells and dropdowns keep colour in children the role walk misses."""
 
