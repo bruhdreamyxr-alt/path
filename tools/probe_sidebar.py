@@ -40,8 +40,12 @@ import tempfile
 import time
 from collections import Counter
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+_reconfigure = getattr(sys.stdout, "reconfigure", None)
+if _reconfigure is not None:
+    # sys.stdout is annotated TextIO, which has no reconfigure(); the stream
+    # underneath (a TextIOWrapper) does. Ask for it by name so the console can
+    # still be switched to UTF-8 without the attribute read failing a checker.
+    _reconfigure(encoding="utf-8", errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -333,7 +337,7 @@ set_rail(False)
 check("collapsed rail leaves no half-drawn text", not slivers(), str(slivers()))
 shot = grab()
 shot.save(os.path.join(OUT, "30_collapsed.png"))
-shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.NEAREST).save(
+shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.Resampling.NEAREST).save(
     os.path.join(OUT, "31_collapsed_zoom.png"))
 frag = fragments(shot)
 check("nothing is drawn in the rail beside the icons", not frag, str(frag))
@@ -343,7 +347,7 @@ check("expanded rail shows every label whole", not slivers(), str(slivers()))
 check("wordmark lines up with the row labels",
       app.sb_brand.winfo_rootx() == app._sb_texts['queue'].winfo_rootx(),
       f"{app.sb_brand.winfo_rootx()} vs {app._sb_texts['queue'].winfo_rootx()}")
-grab().crop((0, 0, 240, 380)).resize((720, 1140), Image.NEAREST).save(
+grab().crop((0, 0, 240, 380)).resize((720, 1140), Image.Resampling.NEAREST).save(
     os.path.join(OUT, "32_expanded_zoom.png"))
 
 
@@ -372,7 +376,7 @@ if bubbles:
           abs((tp.winfo_rooty() + tp.winfo_height() / 2)
               - (row.winfo_rooty() + row.winfo_height() / 2)) <= 6,
           f"{tp.winfo_rooty()} vs {row.winfo_rooty()}")
-    grab().crop((0, 120, 320, 300)).resize((960, 540), Image.NEAREST).save(
+    grab().crop((0, 120, 320, 300)).resize((960, 540), Image.Resampling.NEAREST).save(
         os.path.join(OUT, "33_hover_bubble.png"))
     # drifting across the row must not move the bubble anywhere new: it belongs
     # to the row, not to whichever of its labels the pointer is over
@@ -416,7 +420,7 @@ move(app.sidebar.winfo_rootx() + 90, icon.winfo_rooty() + 18, 1.0)
 check("peek stays open once the labels are under the pointer",
       app.sidebar.winfo_width() == T.SB_W_EXPANDED,
       str(app.sidebar.winfo_width()))
-grab().crop((0, 0, 320, 380)).resize((960, 1140), Image.NEAREST).save(
+grab().crop((0, 0, 320, 380)).resize((960, 1140), Image.Resampling.NEAREST).save(
     os.path.join(OUT, "34_peek_open.png"))
 move(app.winfo_rootx() + 700, icon.winfo_rooty() + 18, 1.4)
 check("peek closes when the pointer leaves",
@@ -436,7 +440,7 @@ shot = grab()
 check("an idle rail paints each row whole", not painted(shot), str(painted(shot)))
 move(row.winfo_rootx() + 90, row.winfo_rooty() + 18, 1.1)
 shot = grab()
-shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.NEAREST).save(
+shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.Resampling.NEAREST).save(
     os.path.join(OUT, "35_hover_whole.png"))
 check("a hovered row is one chip, not a box per label",
       not painted(shot), str(painted(shot)))
@@ -446,7 +450,7 @@ app.show_frame('history')
 row2 = app.nav_buttons['settings']
 move(row2.winfo_rootx() + 90, row2.winfo_rooty() + 18, 1.2)
 shot = grab()
-shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.NEAREST).save(
+shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.Resampling.NEAREST).save(
     os.path.join(OUT, "36_after_switch.png"))
 check("switching pages paints every row whole",
       not painted(shot), str(painted(shot)))
@@ -456,7 +460,7 @@ set_rail(False)
 move(app.sidebar.winfo_rootx() + 25,
      app.nav_buttons['queue'].winfo_rooty() + 18, 1.1)
 shot = grab()
-shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.NEAREST).save(
+shot.crop((0, 0, 240, 380)).resize((720, 1140), Image.Resampling.NEAREST).save(
     os.path.join(OUT, "37_collapsed_hover.png"))
 check("collapsed, a hovered icon still sits on a whole chip",
       not painted(shot), str(painted(shot)))

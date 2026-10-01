@@ -19,7 +19,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # TextIO ships no reconfigure(); the real stream does. getattr keeps the
+    # optional call out of the checker's way, and the except covers a stream
+    # that cannot be switched at all.
+    getattr(sys.stdout, "reconfigure")(encoding="utf-8", errors="replace")
 except Exception:
     pass
 

@@ -24,6 +24,7 @@ import os
 import sys
 import tempfile
 import time
+from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -46,7 +47,7 @@ def shot(img, name, scale=1):
     os.makedirs(OUT, exist_ok=True)
     if scale != 1:
         img = img.resize((img.width * scale, img.height * scale),
-                         resample=Image.NEAREST)
+                         resample=Image.Resampling.NEAREST)
     path = os.path.join(OUT, f"{name}.png")
     img.save(path)
     return path
@@ -85,11 +86,16 @@ def grab():
     return ImageGrab.grab(bbox=(ox, oy, ox + cw, oy + ch), all_screens=True), ox, oy
 
 
-def norm(widget, spec):
-    """Resolve a CTk/tk color spec ('#hex', 'gray86', (light, dark)) to rgb."""
+def norm(widget, spec: Any):
+    """Resolve a CTk/tk color spec ('#hex', 'gray86', (light, dark)) to rgb.
+
+    ``spec`` stays Any because it arrives straight from ``cget()``: the
+    isinstance check below is what knows which shape it has.
+    """
     if isinstance(spec, (tuple, list)):
         dark = ctk.get_appearance_mode().lower().startswith("dark")
-        spec = spec[1] if dark and len(spec) > 1 else spec[0]
+        pair = list(spec)        # one length, so no branch narrows the index
+        spec = pair[1] if dark and len(pair) > 1 else pair[0]
     try:
         r, g, b = widget.winfo_rgb(spec)
         return (r >> 8, g >> 8, b >> 8)
@@ -301,7 +307,7 @@ def main():
 
     # A diagnostic must not leave fingerprints: prefs writes are disabled so
     # the run cannot overwrite the user's saved window position or theme.
-    ui_mod.UniversalAudioStudio._set_pref = lambda self, k, v: None
+    setattr(ui_mod.UniversalAudioStudio, "_set_pref", lambda self, k, v: None)
 
     ctk.set_appearance_mode("dark")
     app = UniversalAudioStudio()

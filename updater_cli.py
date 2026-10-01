@@ -237,7 +237,10 @@ def _wait_for_process_exit(pid, timeout=10):
     if not pid:
         return
     try:
-        import psutil  # optional, lighter fallback below
+        # psutil is optional (not in requirements.txt) and ships without typed
+        # source, so Pylance cannot resolve this import; the except below
+        # covers a machine that does not have it at all.
+        import psutil  # type: ignore
         try:
             p = psutil.Process(int(pid))
             p.wait(timeout=timeout)
