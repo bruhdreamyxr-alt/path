@@ -10,7 +10,7 @@ import queue
 import logging
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 import sys
 import ctypes
 
@@ -2204,7 +2204,8 @@ class UniversalAudioStudio(ctk.CTk):
     # Themed dialogs (replacement for the gray OS message boxes)
     # -----------------
     def _show_dialog(self, title: str, message: str, kind: str = "info",
-                     detail: str = None, action_label: str = None,
+                     detail: Optional[str] = None,
+                     action_label: Optional[str] = None,
                      action_cb=None):
         """Themed stand-in for ``messagebox.show{info,error,warning}``.
 
@@ -2364,17 +2365,21 @@ class UniversalAudioStudio(ctk.CTk):
         dlg.after(90, _grab)
         return dlg
 
-    def _show_info_dialog(self, title: str, message: str, detail: str = None):
+    def _show_info_dialog(self, title: str, message: str,
+                          detail: Optional[str] = None):
         return self._show_dialog(title, message, "info", detail=detail)
 
-    def _show_success_dialog(self, title: str, message: str, detail: str = None):
+    def _show_success_dialog(self, title: str, message: str,
+                             detail: Optional[str] = None):
         return self._show_dialog(title, message, "success", detail=detail)
 
-    def _show_warning_dialog(self, title: str, message: str, detail: str = None):
+    def _show_warning_dialog(self, title: str, message: str,
+                             detail: Optional[str] = None):
         return self._show_dialog(title, message, "warning", detail=detail)
 
-    def _show_error_dialog(self, title: str, message: str, detail: str = None,
-                           action_label: str = None, action_cb=None):
+    def _show_error_dialog(self, title: str, message: str,
+                           detail: Optional[str] = None,
+                           action_label: Optional[str] = None, action_cb=None):
         return self._show_dialog(title, message, "error", detail=detail,
                                  action_label=action_label, action_cb=action_cb)
 
@@ -2423,9 +2428,13 @@ class UniversalAudioStudio(ctk.CTk):
 
             # Start off the right edge and let _reposition_toasts glide it in;
             # the rest of the stack slides up to make room in the same loop.
-            toast._toast_relx = 1.12 if getattr(self, "nav_anim_enabled", True) else 0.98
-            toast._toast_rely = 0.955
-            toast._toast_leaving = False
+            # setattr, not plain assignment: a toast is a bare CTkFrame, so
+            # these slots are per-instance extras rather than declared widget
+            # attributes (the same shape as the _theme_roles tag above).
+            setattr(toast, "_toast_relx",
+                    1.12 if getattr(self, "nav_anim_enabled", True) else 0.98)
+            setattr(toast, "_toast_rely", 0.955)
+            setattr(toast, "_toast_leaving", False)
 
             self._active_toasts.append(toast)
             self._reposition_toasts()
@@ -2433,7 +2442,7 @@ class UniversalAudioStudio(ctk.CTk):
             def _dismiss(*_args):
                 if getattr(toast, "_toast_leaving", False):
                     return
-                toast._toast_leaving = True
+                setattr(toast, "_toast_leaving", True)
                 try:
                     self._active_toasts.remove(toast)
                 except ValueError:
@@ -4508,8 +4517,10 @@ class UniversalAudioStudio(ctk.CTk):
             except Exception:
                 pass
 
-    def _repaint_nav_hint(self, name, base=None, accent=None,
-                          text_c=None, sub_c=None):
+    def _repaint_nav_hint(self, name, base: Optional[str] = None,
+                          accent: Optional[str] = None,
+                          text_c: Optional[str] = None,
+                          sub_c: Optional[str] = None):
         """Right slot: an accent badge while a count is set, else the digit.
 
         Takes the already-mixed colors when _repaint_nav_rows is looping (so
@@ -4525,6 +4536,13 @@ class UniversalAudioStudio(ctk.CTk):
             accent = pal.get('accent', UITheme.COLOR_PRIMARY)
             text_c = pal.get('text', '#ecf0f1')
             sub_c = pal.get('sub', UITheme.COLOR_GRAY)
+        # A caller may hand over only the row's base fill, and a palette key
+        # can come back blank, so settle every slot: _on_color() cannot take
+        # a None fill and a None ink would leave the badge unreadable.
+        base = base or UITheme.SIDEBAR_BG
+        accent = accent or UITheme.COLOR_PRIMARY
+        text_c = text_c or '#ecf0f1'
+        sub_c = sub_c or UITheme.COLOR_GRAY
         count = getattr(self, '_sb_badges', {}).get(name) or 0
         try:
             if count:
@@ -4806,7 +4824,8 @@ class UniversalAudioStudio(ctk.CTk):
         roles = self._BTN_ROLES.get(role)
         if not roles:
             return btn
-        colors: dict[str, str] = {}
+        # Values are mixed: hex colours plus the int corner_radius/border_width.
+        colors: dict[str, Any] = {}
         for opt, role_name in roles.items():
             val = pal.get(role_name)
             if val:

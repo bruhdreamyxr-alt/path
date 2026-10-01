@@ -362,6 +362,33 @@ class TypeTokenTests(unittest.TestCase):
         self.assertEqual(UITheme.F(12, "bold"), (_UI_FONT_FAMILY, 12, "bold"))
 
 
+class AnnotationTests(unittest.TestCase):
+    """A promise the checker rejects is a bug waiting in that code path.
+
+    ui.py is built out of optional strings and mixed colour recipes; typing
+    them honestly (``Optional[str]``, ``dict[str, Any]``) is what keeps the
+    Problems panel quiet enough that a real error - like a ``border_color``
+    CustomTkinter refuses - stands out instead of drowning in noise.
+    """
+
+    # `detail: str = None` says "required string" and then hands over None.
+    REQUIRED_BUT_NONE = re.compile(
+        r": (?:str|int|bool|float|dict|list|tuple) = None\b")
+
+    def test_no_parameter_promises_a_type_it_defaults_to_None(self):
+        src = _source()
+        for line_no, line in enumerate(src.splitlines(), 1):
+            self.assertIsNone(
+                self.REQUIRED_BUT_NONE.search(line),
+                "ui.py:%d %s defaults to None, so it is not required - "
+                "annotate it Optional[...]" % (line_no, line.strip()))
+        typing_imports = [l for l in src.splitlines()
+                          if l.startswith("from typing import")]
+        self.assertTrue(typing_imports, "ui.py imports nothing from typing")
+        self.assertIn("Optional", " ".join(typing_imports),
+                      "Optional[...] is used but not imported")
+
+
 class ButtonPaletteTests(unittest.TestCase):
     """Build sites pick button colors from the palette, not hex literals.
 
@@ -397,6 +424,13 @@ class ButtonPaletteTests(unittest.TestCase):
         body = _method_source("show_toast")
         self.assertIn("pal.get(role", body)
         self.assertNotIn("colors = {", body)
+
+    def test_the_button_recipe_admits_its_int_values(self):
+        # corner_radius/border_width are ints, so a dict[str, str] recipe both
+        # misleads a reader and is reported by the checker on every write.
+        self.assertIn("colors: dict[str, Any]",
+                      _method_source("_style_button"))
+        self.assertIn("RADIUS_MD", _method_source("_style_button"))
 
 
 class PageTitleTests(unittest.TestCase):
@@ -719,8 +753,11 @@ class ToastMotionTests(unittest.TestCase):
     def test_a_new_toast_starts_off_the_edge_and_is_glided_in(self):
         body = _method_source("show_toast")
         # relx 1.12 is past the right edge (resting slot is 0.98); with motion
-        # off it is placed straight on its slot.
-        self.assertIn("toast._toast_relx = 1.12", body)
+        # off it is placed straight on its slot. (setattr, because a toast slot
+        # is a per-instance extra on a CTkFrame, not a declared attribute.)
+        self.assertIn('setattr(toast, "_toast_relx"', body)
+        self.assertIn("1.12 if getattr(self, \"nav_anim_enabled\", True) else 0.98",
+                      body)
         self.assertIn("nav_anim_enabled", body)
         self.assertIn("self._reposition_toasts()", body)
 
@@ -733,6 +770,15 @@ class ToastMotionTests(unittest.TestCase):
                         dismiss.index("self._fly_off_toast(toast)"))
         # Double dismissal (click then timer) must not animate twice.
         self.assertIn("_toast_leaving", dismiss)
+
+    def test_toast_slots_are_set_on_the_instance_not_the_class(self):
+        # A toast is a plain CTkFrame, so relx/rely/leaving are per-instance
+        # extras: they go on with setattr (like the _theme_roles tag) rather
+        # than as direct writes a checker reports as unknown class attributes.
+        body = _method_source("show_toast")
+        for slot in ("_toast_relx", "_toast_rely", "_toast_leaving"):
+            self.assertIn('setattr(toast, "%s"' % slot, body)
+        self.assertNotIn("toast._toast_relx =", body)
 
     def test_fly_off_moves_right_past_the_resting_slot_then_destroys(self):
         body = _method_source("_fly_off_toast")
@@ -870,6 +916,19 @@ class SidebarRailTests(unittest.TestCase):
         # The queue's remaining count is what drives the queue row's badge.
         self.assertIn("self._set_nav_badge('queue'",
                       _method_source("_update_queue_status"))
+
+    def test_a_badge_with_a_missing_colour_still_paints(self):
+        """_on_color() takes str: a None fill would raise, not degrade.
+
+        The badge slot is the one painter a caller can reach with nothing but
+        a name (_set_nav_badge), and a palette key can come back blank, so
+        every slot has to be settled before it is used.
+        """
+        body = _method_source("_repaint_nav_hint")
+        for slot in ("base", "accent", "text_c", "sub_c"):
+            self.assertIn(
+                "%s = %s or " % (slot, slot), body,
+                "%s can still reach _on_color() as None" % slot)
 
     def test_peek_waits_for_a_rest_and_only_moves_the_width(self):
         body = _method_source("_sb_peek_track")
