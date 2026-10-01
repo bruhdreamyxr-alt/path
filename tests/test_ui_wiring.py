@@ -85,6 +85,53 @@ class UrlEnterBindingTests(unittest.TestCase):
         self.assertIn('cget("state")', body)
 
 
+class PasteAnywhereTests(unittest.TestCase):
+    """Ctrl+V anywhere is the downloader's most common action."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ui
+        cls.app = ui.UniversalAudioStudio()
+        cls.app.update_idletasks()
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.app.destroy()
+        except Exception:
+            pass
+
+    def setUp(self):
+        self.app.clipboard_clear()
+        self.app.clipboard_append("https://soundcloud.com/x/mary")
+        self.app.url_entry.delete(0, "end")
+
+    def test_a_paste_from_another_page_lands_in_the_url_box(self):
+        app = self.app
+        app.show_frame("studio")
+        app.update_idletasks()
+        self.assertEqual(app._paste_url_anywhere(), "break")
+        self.assertEqual(app.url_entry.get(), "https://soundcloud.com/x/mary")
+        # And it brings the user to the box that took it.
+        self.assertEqual(app._current_page, "downloader")
+
+    def test_a_visible_field_keeps_its_own_paste(self):
+        app = self.app
+        app.show_frame("downloader")
+        app.update_idletasks()
+        app.url_entry.insert(0, "already typed")
+        app.url_entry.focus_set()
+        app.update_idletasks()
+        # Returning None lets the event keep bubbling to the entry's own
+        # Ctrl+V, instead of the toplevel stamping over what is in there.
+        self.assertIsNone(app._paste_url_anywhere())
+        self.assertEqual(app.url_entry.get(), "already typed")
+
+    def test_the_binding_is_on_the_window_so_any_page_reaches_it(self):
+        src = _source()
+        self.assertIn("self.bind('<Control-v>', self._paste_url_anywhere)", src)
+
+
 class CloseWhileDownloadingTests(unittest.TestCase):
     """Closing mid-download must ask first (Tier 1 #2)."""
 
@@ -344,6 +391,21 @@ class QueueRowLabelTests(unittest.TestCase):
     def test_unknown_status_gets_the_placeholder_icon(self):
         item = SimpleNamespace(status="weird", url="u")
         self.assertTrue(self.app._queue_row_label(0, item, 9).startswith("○ "))
+
+    def test_a_row_names_the_track_once_it_is_known(self):
+        item = SimpleNamespace(status="done", url="https://soundcloud.com/x/mary")
+        item.title = "Mary"
+        label = self.app._queue_row_label(0, item, -1)
+        self.assertIn("Mary", label)
+        self.assertNotIn("soundcloud.com", label)
+
+    def test_a_pending_row_still_shows_the_url_it_was_given(self):
+        # There is no title before the download, so the address is the only
+        # honest thing to show - not an empty row.
+        item = SimpleNamespace(status="pending", url="https://example.com/x")
+        item.title = None
+        self.assertIn("https://example.com/x",
+                      self.app._queue_row_label(0, item, -1))
 
     def test_queue_status_marks_are_plain_geometry(self):
         """A status column of colour emoji reads as a row of mismatched stickers.

@@ -1,0 +1,71 @@
+name: Tests and UI probes
+
+# The release workflow builds and publishes; nothing ran the tests. A change
+# could ship with a failing suite, and - the reason this file exists - with a
+# composite widget left on a stale palette: CTkScrollableFrame paints its colour
+# into a bare tkinter.Canvas that no unit test reads, so only a probe that
+# builds the real window catches it. tools/probe_theme_follow.py does exactly
+# that, and fails if the fix is reverted.
+#
+# Windows is the platform this app is built and used on, and the one where the
+# Tk widgets, the icon rendering and the colour maths are all exercised for
+# real. Ubuntu runs the same suite headlessly so a change cannot pass on one
+# platform and fail on the other.
+#
+# The screenshot probes (probe_chrome, probe_sidebar) stay out of CI on purpose:
+# they capture the screen through platform APIs written for a desktop session.
+# probe_theme_follow needs nothing but a window.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the other - the two catch
+      # different things.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Tk needs a display. Windows runners have a desktop session; on Linux
+      # nearly every test in the suite builds a real window, so without this
+      # the job would fail at construction rather than testing anything.
+      - name: Run the test suite
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python -m unittest discover -s tests
+          else
+            python -m unittest discover -s tests
+          fi
+        shell: bash
+
+      - name: Run the UI probes
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python tools/probe_theme_follow.py
+          else
+            python tools/probe_theme_follow.py
+          fi
+        shell: bash
+
+      - name: Audit palette contrast
+        run: python tools/audit_contrast.py

@@ -262,6 +262,15 @@ def _icon_shapes(name: str) -> tuple[tuple[Any, ...], ...]:
         return (('poly', [(14.4, 6.4), (8.4, 12), (14.4, 17.6)]),)
     if name == 'chevron_right':
         return (('poly', [(9.6, 6.4), (15.6, 12), (9.6, 17.6)]),)
+    if name == 'chevron_up':
+        return (('poly', [(6.4, 14.4), (12, 8.4), (17.6, 14.4)]),)
+    if name == 'chevron_down':
+        return (('poly', [(6.4, 9.6), (12, 15.6), (17.6, 9.6)]),)
+    if name == 'skip':
+        # A bar and a triangle, pointing right: "not this one", rather than the
+        # plain X the queue-wide Cancel already uses.
+        return (('polyfill', [(6.6, 6), (9.2, 6), (9.2, 18), (6.6, 18)]),
+                ('polyfill', [(11.2, 6), (18.6, 12), (11.2, 18)]))
     return ()
 
 
@@ -323,8 +332,9 @@ def _paint_icon(canvas, name, color, size=None, width=2):
                 canvas.create_oval(*box(*rest), outline=color,
                                    width=width, tags="icon")
             elif kind == 'arc':
-                canvas.create_arc(*box(*rest[0], rest[1], rest[2]),
-                                  start=rest[3], extent=rest[4],
+                cx, cy, rad, start, extent = rest
+                canvas.create_arc(*box(cx, cy, rad),
+                                  start=start, extent=extent,
                                   style="arc", outline=color, width=width,
                                   capstyle="round", tags="icon")
             else:
@@ -354,7 +364,7 @@ def _render_icon_image(name, color, px):
     fall back to a text-only label instead of losing the control.
     """
     shapes = _icon_shapes(name)
-    if not shapes or Image is None or px <= 0:
+    if not shapes or Image is None or ImageDraw is None or px <= 0:
         return None
     side = int(px) * _ICON_SS
     k = side / float(_ICON_GRID)
@@ -409,7 +419,7 @@ def _render_icon_image(name, color, px):
                 # either - both keep going clockwise.
                 draw.arc(box(rest[0], rest[1], rest[2]), rest[3],
                          rest[3] + rest[4], fill=ink, width=stroke)
-        return img.resize((int(px), int(px)), Image.LANCZOS)
+        return img.resize((int(px), int(px)), Image.Resampling.LANCZOS)
     except Exception:
         logger.debug("Rendering icon %r failed", name, exc_info=True)
         return None
@@ -946,6 +956,15 @@ class _QueueRowList(ctk.CTkScrollableFrame):
             self._paint(prev)
         self._paint(index)
 
+    def select_set(self, index: int) -> None:
+        """Move the highlight without a click - the listbox spelling.
+
+        Reordering a row puts it somewhere new, and the highlight has to go
+        with it: leaving the selection behind would mean the next action
+        applies to whatever row happens to land on the old index.
+        """
+        self._select(index)
+
     def _paint(self, i: int) -> None:
         if not (0 <= i < len(self._rows)):
             return
@@ -1477,6 +1496,10 @@ class UniversalAudioStudio(ctk.CTk):
         # Collapse/expand shortcut (like VS Code's side bar)
         self.bind('<Control-b>', lambda e: self.toggle_sidebar())
 
+        # Paste a link from anywhere on the app into the URL box.
+        self.bind('<Control-v>', self._paste_url_anywhere)
+        self.bind('<Control-V>', self._paste_url_anywhere)
+
         # Quick nav: Ctrl+1..6 jump straight to a page.
         for _n, _page in enumerate(
             ("downloader", "queue", "history", "studio", "settings", "performance"),
@@ -1864,6 +1887,44 @@ class UniversalAudioStudio(ctk.CTk):
         self._clear_url_entry()
         self.url_entry.focus_set()
 
+    def _paste_url_anywhere(self, _event=None):
+        """Ctrl+V anywhere lands the clipboard in the URL box.
+
+        Pasting a link is what this app is for, and the box is empty as often
+        as not, so making the user click it first is pure friction.
+
+        A field keeps the paste only if it is one the user can actually type
+        into. A URL entry left holding focus from startup goes on holding it
+        while the user browses another page, where Tk cannot route keys to it
+        at all - so letting that unmapped widget claim every paste would
+        silently drop the link. Mapped is what decides it.
+
+        Multiple pasted lines go in whole - Enter already splits them and sends
+        the batch to the queue.
+        """
+        try:
+            focus = self.focus_get()
+        except Exception:
+            focus = None
+        if isinstance(focus, (ctk.CTkEntry, ctk.CTkTextbox, tk.Entry, tk.Text)):
+            try:
+                if focus.winfo_ismapped():
+                    return None
+            except Exception:
+                return None
+        try:
+            text = str(self.clipboard_get() or "").strip()
+        except Exception:
+            return "break"
+        if not text:
+            return "break"
+        self.show_frame("downloader")
+        self.url_entry.delete(0, "end")
+        self.url_entry.insert(0, text)
+        self.url_entry.focus_set()
+        self._sync_clear_btn()
+        return "break"
+
     def _on_url_enter(self, _event=None):
         """Pressing Enter in the URL box starts the obvious next action.
 
@@ -2035,11 +2096,34 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_queue_cancel.pack(side="left", padx=4)
         self._style_button(self.btn_queue_cancel, "danger", icon="close")
 
-        # Second row: six buttons in one row (~600px) clipped off the right
-        # edge at the 800px minimum window width, especially with the
-        # sidebar expanded, so the maintenance actions sit on their own row.
+        # Second row: the per-row actions first, then the maintenance ones.
+        # Six buttons in one row (~600px) clipped off the right edge at the
+        # 800px minimum window width, especially with the sidebar expanded, so
+        # these sit on their own row.
+        #
+        # Skip / Up / Down act on the *selected* row, which is the only place a
+        # user can say "not this one" - until now the only way to drop a single
+        # item was to cancel everything and start again.
         queue_btn_row2 = ctk.CTkFrame(self.tab_queue, fg_color="transparent")
         queue_btn_row2.pack(pady=(0, 10))
+
+        self.btn_queue_skip = ctk.CTkButton(
+            queue_btn_row2, text="Skip", width=90, height=UITheme.H_CTRL,
+            command=self._queue_skip_selected)
+        self.btn_queue_skip.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_skip, "secondary", icon="skip")
+
+        self.btn_queue_up = ctk.CTkButton(
+            queue_btn_row2, text="Up", width=78, height=UITheme.H_CTRL,
+            command=lambda: self._queue_move_selected(-1))
+        self.btn_queue_up.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_up, "secondary", icon="chevron_up")
+
+        self.btn_queue_down = ctk.CTkButton(
+            queue_btn_row2, text="Down", width=86, height=UITheme.H_CTRL,
+            command=lambda: self._queue_move_selected(1))
+        self.btn_queue_down.pack(side="left", padx=4)
+        self._style_button(self.btn_queue_down, "secondary", icon="chevron_down")
 
         self.btn_queue_clear = ctk.CTkButton(
             queue_btn_row2, text="Clear", width=90, height=UITheme.H_CTRL,
@@ -2064,12 +2148,20 @@ class UniversalAudioStudio(ctk.CTk):
         """Format one queue row; kept pure so tests can pin the rendering."""
         icon = {"pending": "○", "active": "▶", "done": "✓", "failed": "✗",
                 "skipped": "⊘", "cancelled": "⊘"}.get(item.status, "○")
+        # Name the track, not the address. The queue already resolved a title
+        # for anything it has downloaded, and the History tab has been showing
+        # it all along - so a row that fell back to a raw URL was displaying
+        # less than the app already knew. A pending item has no title yet, and
+        # the URL it was pasted as is the only honest thing to show.
+        title = str(getattr(item, "title", "") or "").strip()
         # Show progress hint for the active item (e.g. "▶ [ACTIVE] 45% ...").
         if idx == active_idx and item.status == "active":
             progress = getattr(item, '_progress', None)
             pct = f" {int(progress*100)}%" if progress is not None else ""
-            return f"{icon} [ACTIVE]{pct} {item.url[:45]}"
-        return f"{icon} [{item.status.upper():>9}] {item.url[:50]}"
+            subject = title or item.url
+            return f"{icon} [ACTIVE]{pct} {subject[:45]}"
+        subject = title or item.url
+        return f"{icon} [{item.status.upper():>9}] {subject[:50]}"
 
     def _rebuild_queue_list(self):
         lb = self.queue_rows
@@ -2133,6 +2225,42 @@ class UniversalAudioStudio(ctk.CTk):
         if self._queue_manager:
             self._queue_manager.cancel()
             self._refresh_queue_tab()
+
+    def _queue_selected_index(self):
+        """Index of the highlighted queue row, or None when nothing is selected."""
+        try:
+            selection = self.queue_rows.curselection()
+        except Exception:
+            return None
+        if not selection:
+            return None
+        return int(selection[0])
+
+    def _queue_skip_selected(self):
+        index = self._queue_selected_index()
+        if index is None:
+            self.show_toast("Select a queue item first.", "info")
+            return
+        self._init_queue_manager()
+        if self._queue_manager and self._queue_manager.skip(index):
+            self._refresh_queue_tab()
+
+    def _queue_move_selected(self, delta: int):
+        index = self._queue_selected_index()
+        if index is None:
+            self.show_toast("Select a queue item first.", "info")
+            return
+        self._init_queue_manager()
+        if not (self._queue_manager and self._queue_manager.move(index, delta)):
+            # The only reason a waiting item cannot move is its neighbour, and
+            # the only neighbour that cannot move is the one in flight.
+            self.show_toast("Only waiting items can be reordered.", "info")
+            return
+        self._refresh_queue_tab()
+        try:
+            self.queue_rows.select_set(index + delta)
+        except Exception:
+            pass
 
     def _queue_clear(self):
         if self._queue_manager:
@@ -4484,21 +4612,19 @@ class UniversalAudioStudio(ctk.CTk):
         setattr(row, "_nav_name", name)
         for widget in (row, ic, tx, hint):
             try:
-                widget.bind("<Return>", lambda _e, n=name: self._nav_activate(n),
-                            add="+")
-                widget.bind("<KP_Enter>", lambda _e, n=name: self._nav_activate(n),
-                            add="+")
-                widget.bind("<space>", lambda _e, n=name: self._nav_activate(n),
-                            add="+")
+                # No add="+": CustomTkinter's bind() takes a bool and always
+                # binds additively onto its internal widgets, so passing the
+                # string Tk accepts would only be a lie to the type checker.
+                widget.bind("<Return>", lambda _e, n=name: self._nav_activate(n))
+                widget.bind("<KP_Enter>", lambda _e, n=name: self._nav_activate(n))
+                widget.bind("<space>", lambda _e, n=name: self._nav_activate(n))
             except Exception:
                 pass
         # The ring has to follow real focus, not just the traversal step that
         # set it: Shift-Tab and a click into the URL box both move focus without
         # going through _focus_step.
-        row.bind("<FocusIn>", lambda _e, n=name: self._nav_focus(n),
-                 add="+")
-        row.bind("<FocusOut>", lambda _e, n=name: self._nav_blur(n),
-                 add="+")
+        row.bind("<FocusIn>", lambda _e, n=name: self._nav_focus(n))
+        row.bind("<FocusOut>", lambda _e, n=name: self._nav_blur(n))
 
         self.nav_buttons[name] = row
         self._sb_icons[name] = ic
@@ -5410,10 +5536,17 @@ class UniversalAudioStudio(ctk.CTk):
             return hit
         light = _render_icon_image(name, ink, px)
         dark = _render_icon_image(name, other, px)
-        if light is None and dark is None:
+        # At least one has to have rendered, and whichever did stands in for
+        # the other: a button whose icon is invisible in one appearance is
+        # better than one that has no icon at all.
+        if light is None:
+            light = dark
+        if dark is None:
+            dark = light
+        if light is None:
             return None
         try:
-            image = ctk.CTkImage(light_image=light or dark, dark_image=dark or light,
+            image = ctk.CTkImage(light_image=light, dark_image=dark,
                                  size=(int(px), int(px)))
         except Exception:
             logger.debug("Wrapping icon %r in a CTkImage failed", name,

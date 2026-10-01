@@ -53,6 +53,63 @@ def _make_queue(save_folder, download_fn=None) -> DownloadQueue:
     return q
 
 
+class QueueRowActionTests(unittest.TestCase):
+    """Skip one item, and reorder the waiting ones.
+
+    Both act on a single row, which is the whole point: before them the only
+    way to drop one item was to cancel the queue and start again.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.q = _make_queue(self.dir)
+        self.q.add(["https://example.com/a", "https://example.com/b",
+                    "https://example.com/c"])
+
+    def _tails(self):
+        return [i.url.rsplit("/", 1)[-1] for i in self.q.items]
+
+    def test_move_swaps_with_a_neighbour(self):
+        self.assertTrue(self.q.move(1, 1))
+        self.assertEqual(self._tails(), ["a", "c", "b"])
+
+    def test_move_reports_failure_rather_than_raising(self):
+        self.assertFalse(self.q.move(0, -1))    # already first
+        self.assertFalse(self.q.move(2, 1))     # already last
+        self.assertFalse(self.q.move(9, 1))     # out of range
+        self.assertFalse(self.q.move(0, 0))     # not a move
+        self.assertEqual(self._tails(), ["a", "b", "c"])
+
+    def test_a_finished_item_cannot_be_reordered(self):
+        self.q.items[0].status = "done"
+        self.assertFalse(self.q.move(0, 1))
+        self.assertEqual(self._tails(), ["a", "b", "c"])
+
+    def test_a_move_cannot_jump_the_item_in_flight(self):
+        # This is what makes reordering safe while the queue is draining: the
+        # active item is never pending, so no move can cross it and leave
+        # _active_index pointing at the wrong row.
+        self.q.items[1].status = "active"
+        self.assertFalse(self.q.move(2, -1))
+        self.assertEqual(self._tails(), ["a", "b", "c"])
+
+    def test_skip_marks_one_pending_item_and_leaves_the_others(self):
+        self.assertTrue(self.q.skip(1))
+        self.assertEqual([i.status for i in self.q.items],
+                         ["pending", "skipped", "pending"])
+
+    def test_skip_refuses_items_that_are_not_waiting(self):
+        self.q.items[0].status = "done"
+        self.assertFalse(self.q.skip(0))
+        self.assertFalse(self.q.skip(9))
+
+    def test_a_skipped_item_can_be_retried(self):
+        self.q.skip(1)
+        self.assertEqual(self.q.retry_failed(), 1)
+        self.assertEqual(self.q.items[1].status, "pending")
+
+
 class QueueSurfaceTests(unittest.TestCase):
     def test_ui_only_reads_attributes_the_queue_actually_has(self):
         names = _queue_attributes_read_by_ui()

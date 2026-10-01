@@ -296,6 +296,53 @@ class DownloadQueue:
             self._persist()
         return reset
 
+    def move(self, index: int, delta: int) -> bool:
+        """Move the item at *index* one place up (-1) or down (+1).
+
+        Only items still waiting can move. That single rule is what makes it
+        safe to reorder while the queue is draining: the item in flight is
+        never pending, so no move can jump across it and leave ``_active_index``
+        pointing at the wrong row. Returns True if anything moved.
+        """
+        if delta not in (-1, 1):
+            return False
+        target = index + delta
+        with self._lock:
+            if not (0 <= index < len(self._items)):
+                return False
+            if not (0 <= target < len(self._items)):
+                return False
+            src, dst = self._items[index], self._items[target]
+            if src.status != "pending" or dst.status != "pending":
+                return False
+            self._items[index], self._items[target] = dst, src
+        self._persist()
+        return True
+
+    def skip(self, index: int) -> bool:
+        """Skip one item rather than the whole queue. Returns True if acted on.
+
+        Skipping the item in flight interrupts just that download and leaves
+        the rest of the queue running, which is the difference between "this
+        one is not what I wanted" and stopping everything and starting again.
+        """
+        with self._lock:
+            if not (0 <= index < len(self._items)):
+                return False
+            item = self._items[index]
+            if item.status == "active":
+                import downloader
+                downloader.request_cancel_download()
+                # The worker marks it skipped/cancelled when the abort lands,
+                # so nothing is written here that it would immediately undo.
+                return True
+            if item.status != "pending":
+                return False
+            item.status = "skipped"
+            item.completed_at = time.time()
+        self._persist()
+        return True
+
     @property
     def active_index(self):
         with self._lock:
