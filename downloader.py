@@ -1643,7 +1643,12 @@ def _strip_soundcloud_noise(text):
     Handles the common formats:
       "Track by Artist"
       "Stream Track by Artist | Listen online for free on SoundCloud"
-      "Listen to Track by Artist #np on #SoundCloud"
+      "Listen to Track by Artist #np on SoundCloud"
+
+    The trailing "#np on SoundCloud" is spelled both ways in the wild - with and
+    without the hash before SoundCloud - and the current pages use the version
+    without it, so a pattern that demanded the hash simply never matched and the
+    whole tail stayed on as part of the artist's name.
     Returns the cleaned string (or '' when empty).
     """
     if not text:
@@ -1652,9 +1657,35 @@ def _strip_soundcloud_noise(text):
     s = s.split('|')[0].strip()                            # "... | Listen online ..."
     s = re.sub(r'^Stream\s+', '', s, flags=re.IGNORECASE)
     s = re.sub(r'^Listen to\s+', '', s, flags=re.IGNORECASE)
-    s = re.sub(r'\s*#np on #SoundCloud\s*', ' ', s, flags=re.IGNORECASE).strip()
+    s = re.sub(r'\s*#np\s+on\s+#?SoundCloud\.?.*$', '', s,
+               flags=re.IGNORECASE).strip()
     s = re.sub(r'\s+', ' ', s).strip()
     return s
+
+
+def _soundcloud_fallback_text(raw_input: str) -> str:
+    """The artist + title a SoundCloud link names, as plain search words.
+
+    Used by the generic "this link is protected, go and find it" path, which
+    otherwise falls back to the URL slug: soundcloud.com/alexg232/mary becomes
+    the query "alexg232 mary", and a handle is not an artist - YouTube knows
+    nothing about it, so the search returns unrelated tracks. The page itself
+    says "Mary by Alex G", which is exactly what we want to search for.
+
+    Returns '' when there is nothing usable, so the caller keeps its own
+    fallback.
+    """
+    if 'soundcloud.com' not in (raw_input or '').lower():
+        return ''
+    try:
+        query = _build_soundcloud_search_query(raw_input)
+    except Exception:
+        return ''
+    if not query:
+        return ''
+    text = re.sub(r'^ytsearch\d+:\s*', '', query).strip()
+    text = re.sub(r'\s+official audio\s*$', '', text, flags=re.IGNORECASE)
+    return text.strip()
 
 
 def _build_soundcloud_search_query(raw_input: str) -> Optional[str]:
@@ -1723,7 +1754,7 @@ def _build_soundcloud_search_query(raw_input: str) -> Optional[str]:
         #    reliable source of the artist when og:title is bare.
         if og_desc and not artist:
             m = re.match(
-                r'^Listen to\s+(?P<t>.+?)\s+by\s+(?P<a>.+?)(?:\s*#np on #SoundCloud.*)?$',
+                r'^Listen to\s+(?P<t>.+?)\s+by\s+(?P<a>.+?)(?:\s*#np\s+on\s+#?SoundCloud.*)?$',
                 og_desc, re.IGNORECASE | re.DOTALL,
             )
             if m:
@@ -2197,19 +2228,47 @@ def _http_get_bytes(url: str, timeout: float = 8.0) -> Optional[bytes]:
         return None
 
 
+# Words that mean "this is a different mix / different take". A catalogue
+# lookup that introduces one of these when the search did not ask for it is not
+# canonicalising a spelling, it is substituting a different recording.
+_VARIANT_TOKENS = {
+    "cover", "covers", "karaoke", "instrumental", "tribute", "remix",
+    "bootleg", "live", "acoustic", "unplugged", "orchestral", "orchestra",
+    "piano", "pianoforte", "rework", "edit", "mix", "mashup", "nightcore",
+    "slowed", "reverb", "sped", "spedup", "demo", "session", "reprise",
+    "version", "vip", "extended", "minus", "radio", "looped", "8d",
+}
+
+
 def _canonical_metadata(artist: str, title: str) -> Optional[dict]:
     """Best-effort canonical artist/title/duration/artwork via the iTunes Search API.
 
-    The iTunes catalog is a clean source of the *correct* spelling of an
-    artist + track name. Using it before a YouTube search fixes the classic
-    "wrong song" failures (e.g. "Radiohead Karma Police" vs "Karma Police
-    Remix"). Returns None on any error/empty so callers keep their existing
-    fallback chain.
+    The iTunes catalog is a clean source of the *correct spelling* of an artist +
+    track name, so using it before a YouTube search fixes real wrong-song
+    failures. It is, though, a *catalogue*, not an oracle: it will happily answer
+    "Alex G Mary" with a tribute album by someone else and "Mary" with a
+    completely different record. Treating that answer as canonical is how a
+    request for one song silently became another.
+
+    So a result is only believed when it corroborates what we already know:
+
+    * the artist has to match. A title is not an identity - "Mary", "Mary" and
+      "Roygbiv" are each a hundred different recordings - so a title match on its
+      own is never enough, and a lookup with no artist to compare against returns
+      nothing at all rather than guessing.
+    * the track name may not gain a mix/take the caller did not ask for
+      ("Blinding Lights" must not come back as "Blinding Lights (Remix)").
+
+    When a result passes both, the caller's own artist is kept and the catalogue
+    contributes the spelling, album, artwork and duration. Returns None on any
+    error/empty/rejected result so callers keep their existing fallback chain.
     """
     try:
-        term = f"{artist} {title}".strip()
-        if not term:
+        # No artist means nothing can corroborate a match: a title-only catalogue
+        # lookup is a guess, and a wrong guess rewrites the song.
+        if not _tokenize(artist) or not _tokenize(title):
             return None
+        term = f"{artist} {title}".strip()
         url = ("{0}?media=music&entity=song&limit=8&term={1}".format(
             _ITUNES_SEARCH_URL, urllib.parse.quote(term)))
         data = _http_get_json(url, timeout=6.0)
@@ -2218,11 +2277,26 @@ def _canonical_metadata(artist: str, title: str) -> Optional[dict]:
         qart, qtit = _tokenize(artist), _tokenize(title)
         best, best_score = None, 0.5
         for r in data["results"]:
-            rtit, rart = _tokenize(r.get("trackName")), _tokenize(r.get("artistName"))
-            if not rtit and not rart:
+            rart = r.get("artistName") or ""
+            rtit = r.get("trackName") or ""
+            rart_toks, rtit_toks = _tokenize(rart), _tokenize(rtit)
+            if not rart_toks and not rtit_toks:
                 continue
-            title_score = _overlap(rtit, qtit) if qtit else (0.4 if rtit else 0.0)
-            artist_score = _overlap(rart, qart) if qart else (0.2 if rart else 0.0)
+            # The same recording means the same artist. Without this the search
+            # happily returns a tribute album by a different act.
+            if _overlap(rart_toks, qart) < 0.5:
+                continue
+            # ... the same mix ...
+            if (rtit_toks - qtit) & _VARIANT_TOKENS:
+                continue
+            # ... and the same song. The artist alone is not enough: an artist
+            # has a whole catalogue, and "Alex G / Mary (Piano Version)" would
+            # otherwise match a completely different Alex G track that happens
+            # to share one word.
+            title_score = _overlap(rtit_toks, qtit)
+            if title_score < 0.5:
+                continue
+            artist_score = _overlap(rart_toks, qart)
             score = 0.7 * title_score + 0.3 * artist_score
             if score > best_score:
                 best_score = score
@@ -2236,7 +2310,9 @@ def _canonical_metadata(artist: str, title: str) -> Optional[dict]:
         # iTunes artwork URL (replace '100x100' with '600x600' for high-res)
         artwork_url = best.get("artworkUrl100", "").replace("100x100", "600x600") if best.get("artworkUrl100") else ""
         return {
-            "artist": (best.get("artistName") or artist).strip(),
+            # The caller's artist is the one the user linked to; a catalogue
+            # credit string ("The Weeknd & ROSALA") makes a worse search query.
+            "artist": artist.strip(),
             "title": (best.get("trackName") or title).strip(),
             "album": (best.get("collectionName") or "").strip(),
             "genre": (best.get("primaryGenreName") or "").strip(),
@@ -2459,6 +2535,17 @@ def _pick_best_entry(entries: list, query_tokens: list) -> Optional[dict]:
         covered = sum(1 for t in meaningful if t in title)
         if covered / len(meaningful) < 0.5:
             return None
+        # Last gate. When nothing in the query asked for a cover, an instrumental
+        # or a remix, then a result set made up of *only* those is a different
+        # recording rather than a worse spelling of this one - and scoring cannot
+        # see that, because the penalties are relative: with a single candidate
+        # the cover still wins by default. Better to say "no match" than to hand
+        # over a different song.
+        if not (set(meaningful) & _VARIANT_TOKENS):
+            titles = [(e.get("title") or "") for e in entries
+                      if isinstance(e, dict)]
+            if titles and all(_tokenize(t) & _VARIANT_TOKENS for t in titles):
+                return None
     return best
 
 
@@ -2478,7 +2565,8 @@ def _prepare_search(query_text: str):
     return search_term, query_tokens
 
 
-def _search_and_download_best(query_text: str, ydl_opts: dict) -> Optional[dict]:
+def _search_and_download_best(query_text: str, ydl_opts: dict,
+                              status_callback=None) -> Optional[dict]:
     """Search for `query_text` and download the best match in ONE yt-dlp session.
 
     This is the fast path: it runs a `ytsearch5` extraction (so the accuracy
@@ -2537,6 +2625,16 @@ def _search_and_download_best(query_text: str, ydl_opts: dict) -> Optional[dict]
                     set_last_dl_metadata(artist=best_artist, title=best_title)
             except Exception:
                 pass
+            # ... and say which video that was. A search that quietly hands over
+            # a different recording is invisible until the user plays the file and
+            # notices, and the chosen title is the one fact that settles it.
+            if status_callback is not None:
+                try:
+                    chosen = str(best.get("title") or "").strip()
+                    if chosen:
+                        status_callback(f"Found: {chosen}", "#3498db")
+                except Exception:
+                    pass
             # Download from the already-extracted info dict (no re-extraction).
             ydl.process_ie_result(best, download=True)
             return best
@@ -2689,7 +2787,8 @@ def download_track(
 
             best = None
             if python_can_download:
-                best = _search_and_download_best(search_query, ydl_opts)
+                best = _search_and_download_best(search_query, ydl_opts,
+                                                    status_callback)
                 if best is None:
                     # Fast path failed (no search results / extraction error):
                     # fall back to letting yt-dlp download the search spec directly.
@@ -2733,7 +2832,8 @@ def download_track(
 
             best = None
             if python_can_download:
-                best = _search_and_download_best(search_query, ydl_opts)
+                best = _search_and_download_best(search_query, ydl_opts,
+                                                    status_callback)
                 if best is None:
                     # Fast path failed (no search results / extraction error):
                     # fall back to letting yt-dlp download the search spec directly.
@@ -2773,7 +2873,8 @@ def download_track(
 
         if python_can_download:
             # Fast path: search + download in one session (no double extraction).
-            best_entry = _search_and_download_best(raw_input, ydl_opts)
+            best_entry = _search_and_download_best(raw_input, ydl_opts,
+                                                 status_callback)
         if best_entry is None:
             # Fast path unavailable/failed: fall back to a plain ytsearch1 spec
             # so the normal download path below still works.
@@ -2882,6 +2983,14 @@ def download_track(
                 artist_name = url_parts[-2].replace('-', ' ').replace('_', ' ') if len(url_parts) > 2 else ""
 
             fallback_text = f"{artist_name} {track_title}".strip()
+            # A URL slug is a poor description of a track, and for SoundCloud the
+            # page says who actually made it ("Mary by Alex G"). A handle is not
+            # an artist: YouTube knows nothing about "alexg232", so the search
+            # comes back with whatever else is called Mary.
+            if not artist_name and 'soundcloud.com' in raw_input.lower():
+                from_page = _soundcloud_fallback_text(raw_input)
+                if from_page:
+                    fallback_text = from_page
             fallback_query = fallback_text or raw_input
             status_callback("Searching YouTube Alternative...", "#f1c40f")
             try:
@@ -2897,7 +3006,8 @@ def download_track(
                     if progress_callback:
                         ydl_opts['progress_hooks'] = [build_progress_hook(status_callback, progress_callback)]
                     # Fast path: search + download in one session.
-                    best = _search_and_download_best(fallback_query, ydl_opts)
+                    best = _search_and_download_best(fallback_query, ydl_opts,
+                                                      status_callback)
                     if best is None:
                         raise RuntimeError("No matching YouTube track was found.")
 
