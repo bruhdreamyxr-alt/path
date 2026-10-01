@@ -1319,6 +1319,103 @@ class KeyboardAndPressTests(unittest.TestCase):
         self.assertIn('self.bind("<Button-1>"', _method_source("_collect_focusables"))
 
 
+class RailKeyboardTests(unittest.TestCase):
+    """The rail is the one control that decides what the rest of the app shows."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ui
+        cls.app = ui.UniversalAudioStudio()
+        cls.app.update_idletasks()
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.app.destroy()
+        except Exception:
+            pass
+
+    def test_every_rail_row_is_on_the_tab_order(self):
+        app = self.app
+        self.assertTrue(app.nav_buttons, "no rail rows were built")
+        for name, row in app.nav_buttons.items():
+            self.assertIn(row, app._focusables,
+                          f"the {name} row is not reachable by Tab")
+
+    def test_the_rail_comes_first_because_it_is_the_leftmost_column(self):
+        # You cannot use a page until you can get to it, so navigation has to
+        # lead rather than sit at the end of the page's controls.
+        first = self.app._focusables[0]
+        self.assertEqual(getattr(first, "_nav_name", None), "downloader")
+
+    def test_a_row_answers_enter_and_space_by_switching_page(self):
+        app = self.app
+        row = app.nav_buttons["history"]
+        # CTkFrame.bind() forwards to the frame's own canvas, so that is where
+        # focus has to sit for Enter and space to reach the row at all.
+        target = app._focus_target(row)
+        for sequence in ("<Return>", "<space>"):
+            app.show_frame("downloader")
+            app.update_idletasks()
+            target.focus_set()
+            target.event_generate(sequence, when="now")
+            app.update_idletasks()
+            self.assertEqual(app._current_page, "history",
+                             f"{sequence} did not switch page")
+
+    def test_a_row_takes_focus_so_traversal_can_stop_on_it(self):
+        import tkinter as tk
+        # A CTkFrame is skipped by Tk's own traversal unless it is told it may
+        # hold focus, and CTkFrame.configure() does not know the option.
+        for name, row in self.app.nav_buttons.items():
+            self.assertEqual(str(tk.Frame.cget(row, "takefocus")), "1", name)
+
+    def test_the_ring_follows_focus_and_is_cleared_when_focus_leaves(self):
+        app = self.app
+        app.show_frame("downloader")
+        app._nav_focus("queue")
+        self.assertEqual(app._sb_focus_name, "queue")
+        row = app.nav_buttons["queue"]
+        # The ring goes through the rail's own repaint, because a border set
+        # directly would be wiped by the next hover.
+        self.assertGreaterEqual(int(row.cget("border_width")), 1)
+        app._nav_blur("queue")
+        self.assertIsNone(app._sb_focus_name)
+        self.assertEqual(int(row.cget("border_width")), 0)
+
+    def test_the_focus_list_is_built_after_the_window_is_shown(self):
+        # Built while the window was still withdrawn, the list came out empty
+        # of rail rows: they are CTkFrames and none had been laid out yet, so
+        # Tab reached every button on the page and still could not change page.
+        src = _source()
+        init = src[src.index("self.deiconify()"):src.index("def _start_worker")]
+        self.assertIn("self._collect_focusables()", init)
+
+
+class CompositeWidgetThemeTests(unittest.TestCase):
+    """Scroll wells and dropdowns keep colour in children the role walk misses."""
+
+    def test_the_theme_pass_repaints_them(self):
+        self.assertIn("self._style_composites(pal)",
+                      _method_source("apply_color_theme"))
+
+    def test_it_finds_them_by_type(self):
+        body = _method_source("_style_composites")
+        self.assertIn("CTkScrollableFrame", body)
+        self.assertIn("CTkOptionMenu", body)
+        self.assertIn("_parent_canvas", body)
+        self.assertIn("_dropdown_menu", body)
+        self.assertIn("_scrollbar", body)
+
+    def test_a_wells_fill_is_resolved_through_its_role_not_its_old_hex(self):
+        # Keeping the literal fg_color captured at build time *is* the staleness
+        # being fixed; the role is what says which tone it is, and the palette is
+        # what says what that tone is now.
+        body = _method_source("_style_composites")
+        self.assertIn('_theme_roles', body)
+        self.assertIn('roles.get("fg_color")', body)
+
+
 class ControlHeightScaleTests(unittest.TestCase):
     """Control heights come from a named scale, not from a spread of numbers."""
 

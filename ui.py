@@ -1560,10 +1560,6 @@ class UniversalAudioStudio(ctk.CTk):
         # Start by showing downloader
         self.show_frame('downloader')
 
-        # Keyboard order and the focus ring, once every control exists (the list
-        # is the tree, so a control built later would be missing from it).
-        self._collect_focusables()
-
         # Everything exists now. Resolve the layout in one pass and show the
         # finished window, instead of letting Tk reveal it widget by widget.
         self._restore_window_geometry()
@@ -1578,6 +1574,13 @@ class UniversalAudioStudio(ctk.CTk):
         # further window-state actions. Without this the app starts with a
         # hidden window: mainloop runs, no error, nothing on screen.
         self.update()
+        # Keyboard order and the focus ring, once the window is actually on
+        # screen. The list is built from the live tree and keeps only what is
+        # mapped, so running it while the window was still withdrawn left the
+        # rail out of it entirely - every rail row is a CTkFrame, and none of
+        # them had been laid out yet, so Tab could reach every button on the
+        # page and still not change page.
+        self._collect_focusables()
         # Caret in the URL box from the first frame: paste + Enter should
         # work without reaching for the mouse first.
         self.url_entry.focus_set()
@@ -4555,6 +4558,35 @@ class UniversalAudioStudio(ctk.CTk):
         self._sb_bind_clickable(
             row, (ic, tx, hint), lambda e, n=name: self.show_frame(n),
             self._sb_tips[name], ic, name=name)
+
+        # Keyboard parity. A row is a CTkFrame, which no traversal stops on and
+        # which CustomTkinter binds no keys to, so without this the rail - the
+        # one control that decides what the rest of the app shows - could only
+        # be reached with the mouse. takefocus is set on the bare Frame because
+        # CTkFrame.configure() only knows its own options.
+        try:
+            tk.Frame.configure(row, takefocus=1)
+        except Exception:
+            pass
+        setattr(row, "_nav_name", name)
+        for widget in (row, ic, tx, hint):
+            try:
+                widget.bind("<Return>", lambda _e, n=name: self._nav_activate(n),
+                            add="+")
+                widget.bind("<KP_Enter>", lambda _e, n=name: self._nav_activate(n),
+                            add="+")
+                widget.bind("<space>", lambda _e, n=name: self._nav_activate(n),
+                            add="+")
+            except Exception:
+                pass
+        # The ring has to follow real focus, not just the traversal step that
+        # set it: Shift-Tab and a click into the URL box both move focus without
+        # going through _focus_step.
+        row.bind("<FocusIn>", lambda _e, n=name: self._nav_focus(n),
+                 add="+")
+        row.bind("<FocusOut>", lambda _e, n=name: self._nav_blur(n),
+                 add="+")
+
         self.nav_buttons[name] = row
         self._sb_icons[name] = ic
         self._sb_texts[name] = tx
@@ -4844,6 +4876,44 @@ class UniversalAudioStudio(ctk.CTk):
         self._sb_peeking = True
         self._animate_sidebar(True)
 
+    def _nav_focus(self, name: str) -> None:
+        if getattr(self, "_sb_focus_name", None) == name:
+            return
+        self._sb_focus_name = name
+        try:
+            self._repaint_nav_rows()
+        except Exception:
+            pass
+
+    def _nav_blur(self, name: str) -> None:
+        if getattr(self, "_sb_focus_name", None) != name:
+            return
+        self._sb_focus_name = None
+        try:
+            self._repaint_nav_rows()
+        except Exception:
+            pass
+
+    def _nav_activate(self, name: str) -> str:
+        """Switch page from the keyboard and keep focus on the row that did it.
+
+        ``show_frame`` rebuilds the focus list, so without putting focus back
+        the ring would disappear and Tab would restart from the top of the page
+        the user had just navigated to.
+        """
+        self.show_frame(name)
+        row = getattr(self, "nav_buttons", {}).get(name)
+        if row is not None:
+            try:
+                self._collect_focusables()
+                self._sb_focus_name = name
+                self._focus_index = 0
+                self._focus_target(row).focus_set()
+                self._repaint_nav_rows()
+            except Exception:
+                logger.debug("Refocusing nav row %r failed", name, exc_info=True)
+        return "break"
+
     def _repaint_nav_rows(self):
         """Paint every rail piece from the palette + hover/press/active state.
 
@@ -4867,10 +4937,19 @@ class UniversalAudioStudio(ctk.CTk):
 
         for name, row in getattr(self, 'nav_buttons', {}).items():
             is_active = name == active
+            # A row holding keyboard focus is ringed like the selected one. It
+            # is not the same thing - the selected row is the page you are on,
+            # the focused row is where Tab is - but on a collapsed rail there
+            # is no label to tell them apart from the chip alone, and a
+            # keyboard user cannot see the pointer position either.
+            focused = name == getattr(self, '_sb_focus_name', None)
             fill, edge, bw = "transparent", "transparent", 0
             icon_c, label_c = sub_c, idle_text
             if is_active:
                 fill, edge, bw = active_fill, active_edge, 1
+                icon_c, label_c = accent, text_c
+            elif focused:
+                edge, bw = accent, UITheme.BORDER_W
                 icon_c, label_c = accent, text_c
             elif name == press:
                 fill, icon_c, label_c = press_fill, accent, text_c
@@ -5222,6 +5301,11 @@ class UniversalAudioStudio(ctk.CTk):
         Tk's own traversal walks CustomTkinter's internals, so the order is taken
         from the widget tree instead: the things a keyboard can actually operate,
         in the order the app built them, which is the order they read on screen.
+
+        The rail rows lead the list because the rail is the leftmost column: a
+        keyboard user has to be able to change page before they can use anything
+        on a page. They are CTkFrames, which no traversal would ever stop on, so
+        they are listed here and made focusable in ``_make_nav_row``.
         """
         wanted = (ctk.CTkButton, ctk.CTkEntry, ctk.CTkCheckBox, ctk.CTkSlider,
                   ctk.CTkOptionMenu, ctk.CTkComboBox, ctk.CTkRadioButton)
@@ -5229,8 +5313,11 @@ class UniversalAudioStudio(ctk.CTk):
         # control on a page that is not showing is unmapped: Tk cannot route a
         # keypress to it, and Tab that lands on one shows a ring around something
         # the user cannot see. Page switches rebuild the list.
-        self._focusables = [w for w in self._iter_widgets()
-                            if isinstance(w, wanted) and w.winfo_ismapped()]
+        rows = [r for r in getattr(self, "nav_buttons", {}).values()
+                if r.winfo_ismapped()]
+        controls = [w for w in self._iter_widgets()
+                    if isinstance(w, wanted) and w.winfo_ismapped()]
+        self._focusables = rows + controls
         self._focus_saved = None
         self._focus_index = -1
         self._press_saved = None
@@ -5263,6 +5350,10 @@ class UniversalAudioStudio(ctk.CTk):
         Several widgets also forward ``focus_set()`` to the same place. An entry
         wants focus on its own text widget either way, which is where the caret
         has to be.
+
+        A rail row needs no exception. ``CTkFrame.bind`` forwards to the frame's
+        own canvas, which is exactly what the ``_canvas`` branch returns - the
+        generic path already puts focus where a row's Enter and space live.
         """
         for attr in ("_entry", "_canvas"):
             inner = getattr(widget, attr, None)
@@ -5304,9 +5395,26 @@ class UniversalAudioStudio(ctk.CTk):
         The border that was there before is saved and put back exactly: a ghost
         button had no border to begin with, and a filled one had the card's edge,
         so restoring anything else would leave a mark the mouse path never made.
+
+        A rail row is handled apart from the rest: it is repainted from its own
+        state machine on every hover and every page switch, so a border set here
+        would be wiped by the next pointer move. The ring goes through that same
+        repaint instead, and looks like what the rail already draws for the row
+        that is selected.
         """
         self._restore_focus_ring()
         if widget is None:
+            return
+        if getattr(widget, "_nav_name", None):
+            # Ring through the rail's repaint, but focus the same canvas the
+            # row's key bindings were forwarded to (see _focus_target).
+            self._sb_focus_name = widget._nav_name
+            try:
+                self._focus_target(widget).focus_set()
+            except Exception:
+                self._sb_focus_name = None
+                return
+            self._repaint_nav_rows()
             return
         pal = getattr(self, "_palette", {}) or {}
         try:
@@ -5319,6 +5427,12 @@ class UniversalAudioStudio(ctk.CTk):
             self._focus_saved = None
 
     def _restore_focus_ring(self) -> None:
+        if getattr(self, "_sb_focus_name", None):
+            self._sb_focus_name = None
+            try:
+                self._repaint_nav_rows()
+            except Exception:
+                pass
         saved = getattr(self, "_focus_saved", None)
         self._focus_saved = None
         if not saved:
