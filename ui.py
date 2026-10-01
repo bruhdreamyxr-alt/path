@@ -4930,6 +4930,60 @@ class UniversalAudioStudio(ctk.CTk):
             yield child
             yield from self._iter_widgets(child)
 
+    def _style_form_controls(self, pal=None):
+        """Paint every checkbox, slider and progress bar from the palette.
+
+        Walks the live tree by *type* instead of a list of attribute names.
+        The name lists this replaces had gone stale: they still named four
+        checkboxes that no longer exist and missed the two the rail settings
+        card adds, so those two kept CustomTkinter's built-in blue in every
+        one of the 21 palettes.
+
+        The options a call site never sets are the other half of the problem:
+        CTk hands out its own theme colors for those, and ``cget()`` returns
+        them as *tuples*, which the role walk skips because it only remaps
+        strings. Nothing else would ever have recolored them, so a slider's
+        track and a progress bar's trough stayed CTk's grays and a slider's
+        knob hovered CTk's blue whatever the palette said.
+        """
+        pal = pal or getattr(self, "_palette", {}) or {}
+        accent = pal.get("accent", UITheme.COLOR_PRIMARY)
+        accent_hover = pal.get("accent_hover", "#2980b9")
+        text = pal.get("text", "#ecf0f1")
+        # The unchecked ring has to be *seen*: the palette's hover tone is a
+        # surface step, too close to the page on the light themes, so the
+        # ring uses the muted text tone instead.
+        edge = pal.get("sub", UITheme.COLOR_GRAY)
+        # Tracks and troughs are the inactive half of a control, so they take
+        # the raised-surface tone (same one the cards' hairlines use).
+        trough = pal.get("hover", UITheme.SIDEBAR_HOVER)
+        # The checkmark is drawn *on* the accent, so it is chosen for contrast
+        # (a palette text tone would vanish into a yellow or cyan accent).
+        on_accent = _on_color(accent, text, pal.get("bg", "#1e1e24"))
+        recipes = (
+            (ctk.CTkCheckBox, {"fg_color": accent, "hover_color": accent_hover,
+                               "border_color": edge,
+                               "checkmark_color": on_accent, "text_color": text}),
+            (ctk.CTkSlider, {"fg_color": trough, "progress_color": accent,
+                             "button_color": text,
+                             "button_hover_color": accent_hover}),
+            (ctk.CTkProgressBar, {"fg_color": trough, "progress_color": accent,
+                                  "border_color": trough}),
+        )
+        done = 0
+        for widget in self._iter_widgets():
+            for cls, colors in recipes:
+                if not isinstance(widget, cls):
+                    continue
+                try:
+                    widget.configure(**colors)
+                    done += 1
+                except Exception:
+                    logger.debug("Styling a %s failed", cls.__name__,
+                                 exc_info=True)
+                break
+        return done
+
     def apply_color_theme(self, name):
         """Apply a named color theme to the entire UI and remember it."""
         pal = COLOR_THEMES.get(name)
@@ -5028,21 +5082,14 @@ class UniversalAudioStudio(ctk.CTk):
                 )
         except Exception:
             pass
-        for bar_name in ('progress_bar', 'studio_progress_bar'):
-            bar = getattr(self, bar_name, None)
-            if bar is not None:
-                try:
-                    bar.configure(progress_color=pal['accent'])
-                except Exception:
-                    pass
-        for sld_name in ('sp_sld', 'rv_sld', 'opacity_slider', 'aria2_conn_slider',
-                         'concurrent_frag_slider', 'nav_anim_speed_slider'):
-            sld = getattr(self, sld_name, None)
-            if sld is not None:
-                try:
-                    sld.configure(progress_color=pal['accent'], button_color=pal['text'])
-                except Exception:
-                    pass
+        # Form controls (checkboxes, sliders, progress bars) are painted from
+        # the palette by *type*, not by name: the name lists that used to live
+        # here had gone stale — they still named four checkboxes that no
+        # longer exist and missed the two the rail settings card adds — and
+        # they never touched the options a call site leaves unset (a track, a
+        # trough, a checkmark), which is where CTk's own colors leaked in.
+        # Every part of a control is set in the one pass below.
+        self._style_form_controls(pal)
 
         # Header + rail text accents
         try:
@@ -5054,16 +5101,6 @@ class UniversalAudioStudio(ctk.CTk):
         # a repaint - this used to hand-tune two labels and leave the rest of
         # the rail on the previous theme's colors.
         self._repaint_nav_rows()
-
-        # Checkboxes: checked fill follows the accent.
-        for cb_name in ('overlay_chk', 'compact_chk', 'opacity_chk', 'disable_max_chk',
-                        'nav_anim_chk', 'aria2_chk', 'soundcloud_chk'):
-            cb = getattr(self, cb_name, None)
-            if cb is not None:
-                try:
-                    cb.configure(fg_color=pal['accent'], hover_color=pal['accent_hover'])
-                except Exception:
-                    pass
 
         # Swatch selection ring: the clickable swatch dots are gone (theme
         # picking lives in the dropdown now), so there is nothing left to ring.

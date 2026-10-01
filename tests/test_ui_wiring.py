@@ -1124,5 +1124,55 @@ class SidebarRailTests(unittest.TestCase):
         self.assertEqual(build.count("place(x=UITheme.SB_PAD_X, y=y)"), 1)
 
 
+class FormControlThemeTests(unittest.TestCase):
+    """Checkboxes, sliders and bars follow the palette, by type not by name."""
+
+    def test_the_theme_pass_styles_controls_through_the_type_walk(self):
+        self.assertIn("self._style_form_controls(pal)",
+                      _method_source("apply_color_theme"))
+
+    def test_the_stale_name_lists_are_gone(self):
+        # These named four checkboxes that no longer exist and missed the two
+        # the rail settings card adds — the two left out kept CustomTkinter's
+        # blue in every one of the 21 palettes, because a name list cannot
+        # notice a control being added somewhere else in the file.
+        src = _source()
+        for legacy in ("overlay_chk", "compact_chk", "opacity_chk",
+                       "disable_max_chk", "opacity_slider"):
+            self.assertNotIn(legacy, src)
+        self.assertNotIn("for cb_name in", src)
+        self.assertNotIn("for bar_name in", src)
+
+    def test_controls_are_found_by_their_class_not_their_attribute(self):
+        body = _method_source("_style_form_controls")
+        for cls in ("CTkCheckBox", "CTkSlider", "CTkProgressBar"):
+            self.assertIn(cls, body)
+        self.assertIn("self._iter_widgets()", body)
+
+    def test_the_options_a_call_site_leaves_unset_are_set_here(self):
+        # Those are the leak: CTk substitutes its own theme colors for them and
+        # cget() returns them as tuples, which the role walk skips because it
+        # only remaps strings. A track, a trough, a ring and a checkmark are
+        # exactly what no call site was setting.
+        body = _method_source("_style_form_controls")
+        for opt in ("fg_color", "border_color", "checkmark_color",
+                    "button_hover_color", "progress_color"):
+            self.assertIn(opt, body)
+
+    def test_the_checkmark_and_the_ring_are_chosen_for_contrast(self):
+        body = _method_source("_style_form_controls")
+        # The checkmark is drawn *on* the accent, so a fixed palette text tone
+        # would vanish into a yellow or cyan accent; the unchecked ring uses
+        # the muted tone because the hover tone is too close to the page on
+        # the light palettes.
+        self.assertIn("_on_color(", body)
+        self.assertIn('pal.get("sub"', body)
+
+    def test_the_probe_watches_the_control_colors_and_fails_on_them(self):
+        probe = (_REPO / "tools" / "probe_chrome.py").read_text(encoding="utf-8")
+        self.assertIn("check_form_controls", probe)
+        self.assertIn("os._exit(1 if control_fails else 0)", probe)
+
+
 if __name__ == "__main__":
     unittest.main()

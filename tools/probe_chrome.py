@@ -19,6 +19,12 @@ Run:  python tools/probe_chrome.py [output-dir]   the two themes, with detail
       python tools/probe_chrome.py --roles         palette sanity, no window
 Prints one line per surface and saves magnified corner crops plus a
 whole-window shot (default output dir: %TEMP%/chrome_probe).
+
+It also walks the live tree for form controls (checkbox / slider / progress
+bar) whose fill, track or ink did not come from the palette: CustomTkinter
+substitutes its own theme colors for any option a call site never sets and
+returns them as tuples, which the theme pass cannot remap. Exits non-zero when
+it finds one; the corner verdicts above stay advisory.
 """
 import os
 import sys
@@ -299,6 +305,47 @@ def check_theme_roles():
     return bad
 
 
+# A control's whole appearance is the fill of its active half, the fill of its
+# inactive half, and the ink on top. CustomTkinter substitutes its own theme
+# values for any of these a call site never sets.
+CONTROL_TYPES = ("CTkCheckBox", "CTkSlider", "CTkProgressBar")
+CONTROL_OPTS = ("fg_color", "hover_color", "progress_color", "button_color",
+                "button_hover_color", "border_color", "checkmark_color")
+
+
+def check_form_controls(app):
+    """Name every form-control color that did not come from the palette.
+
+    CustomTkinter hands out its own theme colors for options a call site never
+    sets, and ``cget()`` returns those as *tuples*. ``apply_color_theme``'s role
+    walk only remaps strings, so a tuple is invisible to it: nothing recolors
+    those options, ever.
+
+    That is exactly how two of the five checkboxes stayed CustomTkinter blue in
+    all 21 palettes — their attribute names were missing from the list the
+    theme pass walked, and a name list cannot survive a control being added
+    somewhere else in the file. This check is name-free on purpose: it reads
+    the live widget tree, so it keeps working when the file moves on.
+    """
+    pal = dict(getattr(app, "_palette", {}) or {})
+    allowed = {str(v).lower() for v in pal.values()} | {"transparent", ""}
+    offenders = []
+    for widget in app._iter_widgets():
+        kind = type(widget).__name__
+        if kind not in CONTROL_TYPES:
+            continue
+        for opt in CONTROL_OPTS:
+            try:
+                cur = widget.cget(opt)
+            except Exception:
+                continue  # this control has no such option
+            if isinstance(cur, (tuple, list)):
+                offenders.append(f"{kind}.{opt} = CTk's own {list(cur)}")
+            elif isinstance(cur, str) and cur.lower() not in allowed:
+                offenders.append(f"{kind}.{opt} = {cur!r} (not in the palette)")
+    return offenders
+
+
 def main():
     import ui as ui_mod
 
@@ -334,6 +381,19 @@ def main():
         img, ox, oy = grab()
         print(f"re-parked at root=({app.winfo_rootx()},{app.winfo_rooty()}) "
               f"geometry={app.geometry()}")
+
+    control_fails = []
+
+    def report_controls(label):
+        """Print and tally the control colors that ignore the active palette."""
+        off = check_form_controls(app)
+        if off:
+            print(f"form controls @ {label}: {len(off)} color(s) not from the "
+                  f"palette:\n  " + "\n  ".join(off))
+            control_fails.extend(f"{label}: {f}" for f in off)
+        else:
+            print(f"form controls @ {label}: every color comes from the palette")
+        return off
 
     def probe_all(label, verbose=True, save=True):
         """Probe every measurable surface; return the ones that are not curved."""
@@ -387,19 +447,32 @@ def main():
         # Every palette, every surface: a corner can be drawn correctly and
         # still be invisible because the theme gives the notch the same color
         # as the fill, and only the full sweep catches that combination.
-        total, fails = 0, []
+        total, fails, ctl_fails = 0, [], []
         for name in COLOR_THEMES:
             app.apply_color_theme(name)
             pump(app, 45)
             found = probe_all(name, verbose=False, save=False)
+            off = check_form_controls(app)
             total += 1
-            print(f"  {name:<18} {'ok' if not found else f'{len(found)} problem(s)'}")
+            notes = []
+            if found:
+                notes.append(f"{len(found)} corner problem(s)")
+            if off:
+                notes.append(f"{len(off)} off-palette control color(s)")
+            print(f"  {name:<18} " + ("  ".join(notes) if notes else "ok"))
             fails += [f"{name}: {f}" for f in found]
+            ctl_fails += [f"{name}: {f}" for f in off]
         print(f"\n{total} themes swept, "
-              + (f"{len(fails)} problem(s):\n  " + "\n  ".join(fails)
+              + (f"{len(fails)} corner problem(s):\n  " + "\n  ".join(fails)
                  if fails else "every surface curved"))
+        print("... and "
+              + (f"{len(ctl_fails)} form-control color(s) not from the palette:"
+                 f"\n  " + "\n  ".join(ctl_fails) if ctl_fails
+                 else "every form-control color from the palette"))
+        control_fails.extend(ctl_fails)
     else:
         probe_all("Startup theme")
+        report_controls(app._color_theme_name)
 
         # The corner triangles hold inherited colors, so a stale one would show
         # up as a wrongly tinted notch the moment the palette changes.
@@ -408,6 +481,7 @@ def main():
             app.apply_color_theme(others[-1])
             pump(app, 45)
             probe_all("Switched theme")
+            report_controls(others[-1])
 
     dlg = app._show_dialog("Download failed", "Could not fetch the page.",
                            "error", detail="HTTP Error 403: Forbidden",
@@ -421,7 +495,10 @@ def main():
     # os._exit skips interpreter shutdown, so buffered stdout would be lost
     # whenever this runs with the output piped somewhere.
     sys.stdout.flush()
-    os._exit(0)
+    # A drawn corner is a judgement call (these crops get eyeballed); a control
+    # color that never came from the palette is not, so that one is what decides
+    # the exit status.
+    os._exit(1 if control_fails else 0)
 
 
 if __name__ == "__main__":
