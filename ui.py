@@ -169,6 +169,132 @@ def _mix(a: str, b: str, t: float) -> str:
         int(round(ca[i] + (cb[i] - ca[i]) * t)) for i in range(3))
 
 
+# ---------------------------------------------------------------
+# Rail icons: drawn, not typed
+# ---------------------------------------------------------------
+# The rail rendered emoji - a down arrow, a clipboard, a clock, a mixer, a
+# palette, a bolt. Nothing about an emoji is ours to set: the font owns its size
+# and its baseline, the colours come from the emoji font instead of the palette,
+# and no two of them carry the same optical weight. The rail is where that shows
+# worst - collapsed, the icons are all there is - and it read as a row of
+# mismatched stickers that ignored the theme they sat in.
+#
+# So they are drawn. One 24x24 grid, one stroke weight, round caps, and an ink
+# colour that is a parameter: the accent while a row is live, the muted tone
+# after. No font is involved, so no font can drift it either.
+_ICON_GRID = 24
+
+
+def _icon_shapes(name: str) -> tuple[tuple[Any, ...], ...]:
+    """Vector shapes for *name* on a 24x24 grid, y down.
+
+    Shape tuples: ``('line', x1, y1, x2, y2)``, ``('poly', [(x, y), ...])``
+    (stroked), ``('polyfill', [(x, y), ...])`` (filled), ``('oval', cx, cy, r)``
+    (outline), ``('disc', cx, cy, r)`` (filled) and ``('half', cx, cy, r)``
+    (outline with its left half filled).
+
+    Geometry only - no canvas, no colours - so a test can pin every icon
+    without opening a window.
+    """
+    if name == 'download':
+        return (('line', 12, 3.5, 12, 14.5),
+                ('poly', [(7, 10), (12, 15), (17, 10)]),
+                ('line', 4.5, 20, 19.5, 20))
+    if name == 'queue':
+        # Rows of dot + bar: a list you can read at 18px, unlike a little tray.
+        # The dots need their size at this scale or they dissolve into the bars.
+        return tuple(shape for y in (6, 12, 18)
+                     for shape in (('disc', 5.0, y, 1.7),
+                                   ('line', 9.8, y, 19, y)))
+    if name == 'history':
+        return (('oval', 12, 12, 8.2),
+                ('line', 12, 12, 12, 6.6),
+                ('line', 12, 12, 16.4, 14))
+    if name == 'studio':
+        return tuple(('line', x, 12 - h / 2, x, 12 + h / 2)
+                     for x, h in ((5.5, 7), (9.8, 15), (14.2, 9), (18.5, 13)))
+    if name == 'settings':
+        return (('half', 12, 12, 8.4),)
+    if name == 'performance':
+        return (('polyfill', [(13.4, 3), (6.6, 13.6), (11, 13.6),
+                              (10.4, 21), (17.4, 10.4), (13, 10.4)]),)
+    if name == 'note':
+        return (('disc', 8.6, 17.4, 3.2),
+                ('line', 11.8, 17.4, 11.8, 5.6),
+                ('poly', [(11.8, 5.6), (17.6, 7.8), (17.6, 11.4)]))
+    if name == 'chevron_left':
+        return (('poly', [(14.4, 6.4), (8.4, 12), (14.4, 17.6)]),)
+    if name == 'chevron_right':
+        return (('poly', [(9.6, 6.4), (15.6, 12), (9.6, 17.6)]),)
+    return ()
+
+
+def _paint_icon(canvas, name, color, size=None, width=2):
+    """Draw icon *name* into *canvas* in *color*, centred. Returns the count.
+
+    The canvas it draws on is a plain Tk widget, so its background is a real
+    colour - the chip it sits on, never "transparent" - and it must be sized to
+    the mark: an opaque box that reaches a chip's corners paints its square over
+    the rounding the chip is there to have (see UITheme.SB_ICON_BOX).
+    """
+    try:
+        canvas.delete('icon')
+        box_w = int(canvas.winfo_reqwidth())
+        box_h = int(canvas.winfo_reqheight())
+    except Exception:
+        return 0
+    if not box_w or not box_h:
+        return 0
+    extent = float(size if size is not None else min(box_w, box_h) - 2)
+    ox, oy = (box_w - extent) / 2.0, (box_h - extent) / 2.0
+    k = extent / _ICON_GRID
+
+    def xy(points: list[tuple[float, float]]) -> list[float]:
+        flat: list[float] = []
+        for x, y in points:
+            flat.extend((ox + x * k, oy + y * k))
+        return flat
+
+    def box(cx: float, cy: float, r: float) -> tuple[float, float, float, float]:
+        return (ox + (cx - r) * k, oy + (cy - r) * k,
+                ox + (cx + r) * k, oy + (cy + r) * k)
+
+    stroke = dict(fill=color, width=width, capstyle="round",
+                  joinstyle="round", tags="icon")
+    drawn = 0
+    for shape in _icon_shapes(name):
+        kind, rest = shape[0], shape[1:]
+        try:
+            if kind == 'line':
+                canvas.create_line(*xy([(rest[0], rest[1]),
+                                        (rest[2], rest[3])]), **stroke)
+            elif kind == 'poly':
+                canvas.create_line(*xy(rest[0]), **stroke)
+            elif kind == 'polyfill':
+                canvas.create_polygon(*xy(rest[0]), fill=color,
+                                      outline=color, width=1,
+                                      joinstyle="round", tags="icon")
+            elif kind == 'oval':
+                canvas.create_oval(*box(*rest), outline=color,
+                                   width=width, tags="icon")
+            elif kind == 'disc':
+                canvas.create_oval(*box(*rest), fill=color,
+                                   outline=color, tags="icon")
+            elif kind == 'half':
+                canvas.create_arc(*box(*rest), start=90, extent=180,
+                                  style="pieslice", fill=color,
+                                  outline=color, width=width, tags="icon")
+                canvas.create_oval(*box(*rest), outline=color,
+                                   width=width, tags="icon")
+            else:
+                continue
+            drawn += 1
+        except Exception:
+            continue
+    return drawn
+
+
+
 def _ring_color(ring, fill, base):
     """A border color CustomTkinter will actually accept.
 
@@ -287,6 +413,20 @@ class UITheme:
     SB_ROW_H = 38
     SB_ROW_GAP = 4
     SB_ROW_W = 180
+    # The drawn icon mark, and the canvas box it lives in. The box is the mark
+    # plus a pixel for the round stroke caps that overhang a line's end, and it
+    # is deliberately no bigger than that: a canvas is opaque where a CTkLabel
+    # was transparent, so a box that reaches the chip's corners paints its
+    # square over the chip's rounding. Centred in a 30x38 chip, 20x20 stays
+    # inside the RADIUS_MD arc at every corner; 28x36 does not.
+    SB_ICON_MARK = 18
+    SB_ICON_BOX = SB_ICON_MARK + 2
+    SB_ICON_X = (SB_ICON_W - SB_ICON_BOX) // 2
+    SB_ICON_Y = (SB_ROW_H - SB_ICON_BOX) // 2
+    # Where that box sits inside a row: centred on the icon column, centred in
+    # the row. Same centring as the labels it sits beside.
+    SB_ICON_X = (SB_ICON_W - SB_ICON_BOX) // 2
+    SB_ICON_Y = (SB_ROW_H - SB_ICON_BOX) // 2
     SB_W_EXPANDED = SB_PAD_X + SB_ROW_W + SB_PAD_X      # 200
     SB_W_COLLAPSED = SB_PAD_X + SB_ICON_W + SB_PAD_X    # 50
 
@@ -306,7 +446,7 @@ COLOR_THEMES = {
         'success': '#27ae60', 'success_hover': '#229954',
         'warning': '#f39c12', 'warning_hover': '#d68910',
         'danger': '#e74c3c', 'danger_hover': '#c0392b',
-        'purple': '#8e44ad', 'purple_hover': '#7d3c98',
+        'purple': '#9e56bc', 'purple_hover': '#7d3c98',
         'mode': 'dark',
     },
     'Serika Dark': {
@@ -349,7 +489,7 @@ COLOR_THEMES = {
         'text': '#eceff4', 'sub': '#a7afbe',
         'success': '#a3be8c', 'success_hover': '#90aa7b',
         'warning': '#ebcb8b', 'warning_hover': '#d4b574',
-        'danger': '#bf616a', 'danger_hover': '#a8535c',
+        'danger': '#c36a73', 'danger_hover': '#a8535c',
         'purple': '#b48ead', 'purple_hover': '#9e7a97',
         'mode': 'dark',
     },
@@ -405,8 +545,8 @@ COLOR_THEMES = {
         'sidebar_active': '#d6cdb7', 'hover': '#c9bfa5',
         'accent': '#268bd2', 'accent_hover': '#1f74b0',
         'text': '#073642', 'sub': '#485a60',
-        'success': '#859900', 'success_hover': '#6f8000',
-        'warning': '#b58900', 'warning_hover': '#9a7500',
+        'success': '#7a8c00', 'success_hover': '#6f8000',
+        'warning': '#a87f00', 'warning_hover': '#9a7500',
         'danger': '#dc322f', 'danger_hover': '#c22a27',
         'purple': '#6c71c4', 'purple_hover': '#5a5eae',
         'mode': 'light',
@@ -517,8 +657,8 @@ COLOR_THEMES = {
         'sidebar_active': '#d6c8e6', 'hover': '#e0d2ec',
         'accent': '#9333ea', 'accent_hover': '#7e22ce',
         'text': '#2d1f3d', 'sub': '#5e506c',
-        'success': '#16a34a', 'success_hover': '#15803d',
-        'warning': '#d97706', 'warning_hover': '#b45309',
+        'success': '#149644', 'success_hover': '#15803d',
+        'warning': '#c56c05', 'warning_hover': '#b45309',
         'danger': '#dc2626', 'danger_hover': '#b91c1c',
         'purple': '#a855f7', 'purple_hover': '#9333ea',
         'mode': 'light',
@@ -528,8 +668,8 @@ COLOR_THEMES = {
         'sidebar_active': '#cccccc', 'hover': '#d4d4d4',
         'accent': '#444444', 'accent_hover': '#2f2f2f',
         'text': '#323437', 'sub': '#555758',
-        'success': '#3f9b6e', 'success_hover': '#35855d',
-        'warning': '#c9952f', 'warning_hover': '#b07f24',
+        'success': '#398c64', 'success_hover': '#35855d',
+        'warning': '#a07625', 'warning_hover': '#b07f24',
         'danger': '#c94949', 'danger_hover': '#ad3c3c',
         'purple': '#7d5bb5', 'purple_hover': '#694a9e',
         'mode': 'light',
@@ -4023,13 +4163,16 @@ class UniversalAudioStudio(ctk.CTk):
         popping in and out.
         """
         pal = self._palette
+        # name -> (drawn icon, label). The icon names index _icon_shapes, so a
+        # row's mark is geometry the palette can ink, not an emoji the system
+        # font gets to decide the size, weight and colour of.
         self._sb_items = {
-            'downloader': ('⬇️', 'Downloader'),
-            'queue': ('📋', 'Queue'),
-            'history': ('🕒', 'History'),
-            'studio': ('🎛️', 'Studio'),
-            'settings': ('🎨', 'Theme'),
-            'performance': ('⚡', 'Speed'),
+            'downloader': ('download', 'Downloader'),
+            'queue': ('queue', 'Queue'),
+            'history': ('history', 'History'),
+            'studio': ('studio', 'Studio'),
+            'settings': ('settings', 'Theme'),
+            'performance': ('performance', 'Speed'),
         }
         # Hover tips: the row's own name plus its shortcut. A sentence here sits
         # in a 300px box over the page, which is a lot of furniture to drop next
@@ -4053,9 +4196,20 @@ class UniversalAudioStudio(ctk.CTk):
             corner_radius=UITheme.RADIUS_SM, fg_color="transparent",
         )
         self.sb_logo.place(x=UITheme.SB_PAD_X, y=14)
-        self.sb_logo_glyph = ctk.CTkLabel(
-            self.sb_logo, text="♪", font=UITheme.F(14, "bold"), cursor="hand2")
+        # The mark is drawn, not typed: a canvas holds the note so the tile's
+        # ink is the palette's accent at any size (see _icon_shapes). The box
+        # is mark-sized for the same reason as a row's: opaque square corners
+        # would square off the tile's RADIUS_SM corners.
+        self.sb_logo_glyph = tk.Canvas(
+            self.sb_logo, width=UITheme.SB_ICON_BOX + 2,
+            height=UITheme.SB_ICON_BOX + 2, highlightthickness=0, bd=0,
+            bg=_mix(pal.get('sidebar', UITheme.SIDEBAR_BG),
+                    pal.get('accent', UITheme.COLOR_PRIMARY), 0.16),
+            cursor="hand2")
         self.sb_logo_glyph.place(relx=0.5, rely=0.5, anchor="center")
+        _paint_icon(self.sb_logo_glyph, 'note',
+                    pal.get('accent', UITheme.COLOR_PRIMARY),
+                    size=UITheme.SB_ICON_MARK - 1)
         self.sb_brand = ctk.CTkLabel(
             self.sidebar, text="TuneLab", font=UITheme.F(14, "bold"),
             anchor="w", cursor="hand2", height=UITheme.SB_ICON_W)
@@ -4090,11 +4244,14 @@ class UniversalAudioStudio(ctk.CTk):
             corner_radius=UITheme.RADIUS_MD, fg_color="transparent",
             border_width=0,
         )
-        self.sb_toggle_glyph = ctk.CTkLabel(
-            self.sb_toggle_btn, text='«', width=UITheme.SB_ICON_W,
-            height=UITheme.SB_ROW_H,
-            font=UITheme.F(15, "bold"), cursor="hand2")
-        self.sb_toggle_glyph.place(x=0, y=0)
+        self.sb_toggle_glyph = tk.Canvas(
+            self.sb_toggle_btn, width=UITheme.SB_ICON_BOX,
+            height=UITheme.SB_ICON_BOX, highlightthickness=0, bd=0,
+            bg=pal.get('sidebar', UITheme.SIDEBAR_BG), cursor="hand2")
+        self.sb_toggle_glyph.place(x=UITheme.SB_ICON_X, y=UITheme.SB_ICON_Y)
+        _paint_icon(self.sb_toggle_glyph, self._sb_chevron(),
+                    pal.get('sub', UITheme.COLOR_GRAY),
+                    size=UITheme.SB_ICON_MARK)
         self.sb_toggle_lbl = ctk.CTkLabel(
             self.sb_toggle_btn, text='Collapse', font=UITheme.F(12),
             anchor="w", cursor="hand2", height=UITheme.SB_ROW_H)
@@ -4144,19 +4301,26 @@ class UniversalAudioStudio(ctk.CTk):
             border_width=0,
         )
         row.place(x=UITheme.SB_PAD_X, y=y)
-        # The icon column never moves, and each label stops a pixel short of the
-        # chip's edges: a CTkLabel paints a rectangle of its own background over
-        # whatever is under it, so labels that span the row edge to edge bit the
-        # selected row's hairline ring wherever they crossed and it arrived in
-        # dashes. The icon box gives up a pixel either side of its 30px column,
-        # which keeps the glyph dead centre in it - and in the collapsed rail,
-        # whose width is exactly that column plus the padding. The word label is
-        # two pixels shorter for the same reason at the top and bottom, and is
-        # still centred (1 + (38 - 2) / 2 == 38 / 2).
-        ic = ctk.CTkLabel(row, text=icon, width=UITheme.SB_ICON_W - 2,
-                          height=UITheme.SB_ROW_H - 2,
-                          font=UITheme.F(15), cursor="hand2")
-        ic.place(x=1, y=1)
+        # Nothing inside a chip ever moves: the icon column sits at one x, the
+        # shortcut slot at another, and Tk clips whatever the rail's edge cuts.
+        # The word label stops a pixel short of the chip's edges and two short of
+        # its height, because a CTkLabel paints a rectangle of its own background
+        # over whatever is under it - labels that spanned the row edge to edge bit
+        # the selected row's hairline ring wherever they crossed and it arrived on
+        # screen in dashes. It is still centred (1 + (38 - 2) / 2 == 38 / 2).
+        # A canvas, not a label: the mark is drawn (see _icon_shapes), so it
+        # fits its box exactly and takes whatever ink the row's state calls for.
+        # The box is the mark and a pixel, never the whole column: a canvas is
+        # opaque where a CTkLabel was transparent, so a box that reached the
+        # chip's corners would paint its square over the chip's rounding.
+        _pal = getattr(self, '_palette', {}) or {}
+        ic = tk.Canvas(row, width=UITheme.SB_ICON_BOX,
+                       height=UITheme.SB_ICON_BOX, highlightthickness=0,
+                       bd=0, bg=_pal.get('sidebar', UITheme.SIDEBAR_BG),
+                       cursor="hand2")
+        ic.place(x=UITheme.SB_ICON_X, y=UITheme.SB_ICON_Y)
+        _paint_icon(ic, icon, _pal.get('sub', UITheme.COLOR_GRAY),
+                    size=UITheme.SB_ICON_MARK)
         tx = ctk.CTkLabel(row, text=label, font=UITheme.F(12), anchor="w",
                           cursor="hand2", height=UITheme.SB_ROW_H - 2)
         tx.place(x=UITheme.SB_TEXT_X, y=1)
@@ -4227,6 +4391,11 @@ class UniversalAudioStudio(ctk.CTk):
         self._sb_set_footer_word(self._sb_shown)
         self._repaint_nav_rows()
 
+    def _sb_chevron(self):
+        """The footer's arrow: it points the way a click will move the rail."""
+        expanded = getattr(self, '_sb_shown', self._sidebar_expanded)
+        return 'chevron_left' if expanded else 'chevron_right'
+
     def _sb_set_footer_word(self, expanded):
         want = 'Collapse' if expanded else 'Expand'
         if getattr(self, '_sb_footer_word', None) == want:
@@ -4234,6 +4403,10 @@ class UniversalAudioStudio(ctk.CTk):
         self._sb_footer_word = want
         try:
             self.sb_toggle_lbl.configure(text=want)
+            # The arrow turns with the word: a footer that reads "Expand" must
+            # not still point left. The ink is whatever the last repaint chose.
+            _paint_icon(self.sb_toggle_glyph, self._sb_chevron(),
+                        getattr(self, '_sb_footer_ink', UITheme.COLOR_GRAY))
         except Exception:
             pass
 
@@ -4483,7 +4656,12 @@ class UniversalAudioStudio(ctk.CTk):
             try:
                 row.configure(fg_color=fill, border_width=bw,
                               border_color=_ring_color(edge, fill, base))
-                self._sb_icons[name].configure(text_color=icon_c)
+                canvas = self._sb_icons[name]
+                # The chip's colour travels to the icon by hand: a canvas is an
+                # opaque Tk widget, not a transparent CTk label, so a background
+                # left behind would frame the glyph in a little rectangle.
+                canvas.configure(bg=fill if fill != "transparent" else base)
+                _paint_icon(canvas, self._sb_items[name][0], icon_c)
                 self._sb_texts[name].configure(text_color=label_c)
             except Exception:
                 logger.debug("nav row %r repaint failed", name, exc_info=True)
@@ -4491,21 +4669,25 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Brand tile, footer chip, hairline, section headers.
         try:
+            tile = _mix(base, accent, 0.16)
             self.sb_logo.configure(
-                fg_color=_mix(base, accent, 0.16),
+                fg_color=tile,
                 border_width=1, border_color=_mix(base, accent, 0.34))
-            self.sb_logo_glyph.configure(text_color=accent)
+            self.sb_logo_glyph.configure(bg=tile)
+            _paint_icon(self.sb_logo_glyph, 'note', accent, size=17)
             self.sb_brand.configure(text_color=text_c)
         except Exception:
             pass
         try:
             on_footer = hover == '__footer__'
-            self.sb_toggle_btn.configure(
-                fg_color=(press_fill if press == '__footer__'
-                          else (hover_fill if on_footer else "transparent")),
-                border_width=0)
+            foot_fill = (press_fill if press == '__footer__'
+                         else (hover_fill if on_footer else "transparent"))
+            self.sb_toggle_btn.configure(fg_color=foot_fill, border_width=0)
+            self._sb_footer_ink = accent if on_footer else sub_c
             self.sb_toggle_glyph.configure(
-                text_color=accent if on_footer else sub_c)
+                bg=foot_fill if foot_fill != "transparent" else base)
+            _paint_icon(self.sb_toggle_glyph, self._sb_chevron(),
+                        self._sb_footer_ink)
             self.sb_toggle_lbl.configure(
                 text_color=text_c if on_footer else idle_text)
             self._sb_footer_sep.configure(fg_color=_mix(base, sub_c, 0.28))

@@ -1117,11 +1117,115 @@ class SidebarRailTests(unittest.TestCase):
         # screen in dashes. One pixel clear of each edge, and they still sit
         # dead centre in the row.
         build = _method_source("_make_nav_row")
-        self.assertEqual(build.count("height=UITheme.SB_ROW_H - 2"), 2)
-        self.assertIn("width=UITheme.SB_ICON_W - 2", build)
-        self.assertIn("ic.place(x=1, y=1)", build)
         self.assertIn("tx.place(x=UITheme.SB_TEXT_X, y=1)", build)
         self.assertEqual(build.count("place(x=UITheme.SB_PAD_X, y=y)"), 1)
+        # The icon cannot be "a pixel shorter" any more: it is a canvas now, so
+        # it has to be small enough that its opaque square never reaches the
+        # chip's corner arc (the next test).
+        self.assertIn("width=UITheme.SB_ICON_BOX", build)
+        self.assertIn("height=UITheme.SB_ICON_BOX", build)
+        self.assertIn("ic.place(x=UITheme.SB_ICON_X, y=UITheme.SB_ICON_Y)",
+                      build)
+
+    def test_the_icon_box_cannot_reach_the_chips_rounded_corners(self):
+        # A chip's corner is an arc of RADIUS_MD centred that far in from the
+        # corner, so a point belongs to the chip only when it is within
+        # RADIUS_MD of that centre. The icon box has to satisfy that at all four
+        # corners: the canvas paints over the arc as a square, which is how the
+        # selected row grew flat corners next to its own icon.
+        import math
+        from ui import UITheme as T
+        r = T.RADIUS_MD
+        w, h, box = T.SB_ICON_W, T.SB_ROW_H, T.SB_ICON_BOX
+        x0, y0 = T.SB_ICON_X, T.SB_ICON_Y
+        corners = ((x0, y0), (x0 + box, y0), (x0, y0 + box),
+                   (x0 + box, y0 + box))
+        for cx_, cy_ in corners:
+            # A point is inside a rounded rect when it is inside the rect and,
+            # in the corner it belongs to, within RADIUS_MD of that arc's centre.
+            arc_x = r if cx_ < w - r else w - r
+            arc_y = r if cy_ < h - r else h - r
+            self.assertLessEqual(
+                math.hypot(cx_ - arc_x, cy_ - arc_y), r,
+                f"icon corner ({cx_},{cy_}) falls outside the chip's arc "
+                f"centred at ({arc_x},{arc_y})")
+
+
+class RailIconTests(unittest.TestCase):
+    """The rail's marks are drawn geometry, not emoji out of a system font."""
+
+    ICONS = ("download", "queue", "history", "studio", "settings",
+             "performance", "note", "chevron_left", "chevron_right")
+
+    @staticmethod
+    def _points(shape):
+        """The (x, y) pairs one shape draws (extreme points for circles)."""
+        kind, rest = shape[0], shape[1:]
+        if kind in ("poly", "polyfill"):
+            return [(p[0], p[1]) for p in rest[0]]
+        if kind in ("oval", "disc", "half"):
+            cx, cy, r = rest
+            return [(cx - r, cy), (cx + r, cy)]
+        return [(rest[0], rest[1]), (rest[2], rest[3])]
+
+    def test_no_colour_emoji_are_left_anywhere_in_the_ui(self):
+        # An emoji brings its own palette, its own size and its own baseline, and
+        # no two of them share a stroke weight. The rail showed six of them and
+        # the eye read a row of unrelated stickers.
+        for glyph in ("⬇", "📋", "🕒", "🎛", "🎨", "⚡", "♪", "«"):
+            self.assertNotIn(glyph, _source(), "emoji left in the UI")
+
+    def test_every_nav_row_maps_to_an_icon_that_draws_something(self):
+        body = _method_source("_build_sidebar")
+        for name in ("download", "queue", "history", "studio", "settings",
+                     "performance"):
+            self.assertIn(f"('{name}',", body)
+        from ui import _icon_shapes
+        for name in self.ICONS:
+            self.assertTrue(_icon_shapes(name), f"{name} draws nothing")
+
+    def test_icons_stay_inside_the_grid_they_are_drawn_on(self):
+        from ui import _ICON_GRID, _icon_shapes
+        slack = 1 / _ICON_GRID          # the round caps overhang by half a stroke
+        for name in self.ICONS:
+            for shape in _icon_shapes(name):
+                for x, y in self._points(shape):
+                    self.assertGreaterEqual(x, 0.5 - slack, name)
+                    self.assertLessEqual(x, _ICON_GRID - 0.5 + slack, name)
+                    self.assertGreaterEqual(y, 0.5 - slack, name)
+                    self.assertLessEqual(y, _ICON_GRID - 0.5 + slack, name)
+
+    def test_every_icon_is_centred_on_its_grid(self):
+        # An icon whose ink hangs to one side of the grid reads off-centre in a
+        # 30px column, and the whole rail is aligned on that column.
+        from ui import _icon_shapes
+        for name in self.ICONS:
+            xs = [x for shape in _icon_shapes(name)
+                  for x, _y in self._points(shape)]
+            self.assertTrue(xs, name)
+            centre = (min(xs) + max(xs)) / 2
+            self.assertLessEqual(abs(centre - 12), 1.5,
+                                 f"{name} ink is centred at {centre}")
+
+    def test_the_icons_are_painted_with_the_row_state_not_a_font(self):
+        # The row repaint has to hand the icon its colour: a canvas cannot be
+        # tinted by a text_color option, and the chip's own fill has to travel
+        # to the canvas background at the same time or the mark sits in a box.
+        repaint = _method_source("_repaint_nav_rows")
+        self.assertIn("canvas.configure(bg=fill", repaint)
+        self.assertIn("_paint_icon(canvas, self._sb_items[name][0], icon_c)",
+                      repaint)
+        self.assertIn("accent", repaint)          # a live row
+        self.assertIn("sub_c", repaint)           # an idle one
+
+    def test_the_footers_arrow_turns_with_the_rail(self):
+        chevron = _method_source("_sb_chevron")
+        self.assertIn("chevron_left", chevron)
+        self.assertIn("chevron_right", chevron)
+        # ... and it is redrawn when the word flips, otherwise a footer reading
+        # "Expand" keeps pointing left.
+        self.assertIn("_paint_icon(self.sb_toggle_glyph, self._sb_chevron()",
+                      _method_source("_sb_set_footer_word"))
 
 
 class FormControlThemeTests(unittest.TestCase):
