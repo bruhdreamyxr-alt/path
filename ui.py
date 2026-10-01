@@ -377,6 +377,19 @@ class UITheme:
     PAD_Y_SMALL = 6
     PAD_Y_MED = 10
 
+    # Control heights, by what the control *is*. These were bare numbers at each
+    # call site - 24, 28, 30, 32 and 36 all appeared - so two controls that ended
+    # up side by side could land a couple of pixels off each other with nothing
+    # in the code to say which of them was wrong. A name says it: the primary
+    # action and the field it sits with are H_LG, a toolbar button is H_CTRL, a
+    # secondary row is H_SM, a form field standing alone is H_FIELD, and a
+    # glyph-only button is H_XS.
+    H_XS = 24         # inline glyph buttons (the clear-X in the URL field)
+    H_SM = 28         # secondary rows: previews, row actions, small entries
+    H_CTRL = 30       # toolbars: the queue's start/remove/retry, clear, ...
+    H_FIELD = 32      # a text field standing on its own (history search)
+    H_LG = 36         # primary actions, the URL field, dialog buttons
+
     # Radius tokens: structural surfaces (content frame, cards) share the
     # card radius; transient chrome (toasts, status pills) the medium one;
     # small controls the small one. Keeps corners consistent per class
@@ -1427,6 +1440,10 @@ class UniversalAudioStudio(ctk.CTk):
         # Start by showing downloader
         self.show_frame('downloader')
 
+        # Keyboard order and the focus ring, once every control exists (the list
+        # is the tree, so a control built later would be missing from it).
+        self._collect_focusables()
+
         # Everything exists now. Resolve the layout in one pass and show the
         # finished window, instead of letting Tk reveal it widget by widget.
         self._restore_window_geometry()
@@ -1499,7 +1516,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.url_entry = ctk.CTkEntry(
             self.tab_downloader,
             width=300,
-            height=36,
+            height=UITheme.H_LG,
             corner_radius=UITheme.RADIUS_FIELD,
             border_width=UITheme.BORDER_W,
             border_color=(getattr(self, "_palette", {}) or {}).get(
@@ -1512,7 +1529,7 @@ class UniversalAudioStudio(ctk.CTk):
         # Inline clear button: overlays the field's right edge and only shows
         # while there is text to clear (Escape does the same from the keyboard).
         self.btn_clear_url = ctk.CTkButton(
-            self.url_entry, text="✕", width=24, height=24,
+            self.url_entry, text="✕", width=24, height=UITheme.H_XS,
             fg_color="transparent", corner_radius=12, cursor="hand2",
             command=self._on_clear_url_clicked,
         )
@@ -1535,7 +1552,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_download_mp3 = ctk.CTkButton(
             action_row,
             text="Download Audio (MP3)",
-            width=200, height=36,
+            width=200, height=UITheme.H_LG,
             cursor="hand2",
             command=lambda: self._start_worker(self.download_mp3)
         )
@@ -1545,7 +1562,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_download_mp4 = ctk.CTkButton(
             action_row,
             text="Download Video (MP4)",
-            width=200, height=36,
+            width=200, height=UITheme.H_LG,
             cursor="hand2",
             command=lambda: self._start_worker(self.download_mp4)
         )
@@ -1559,7 +1576,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_preview_audio = ctk.CTkButton(
             preview_frame,
             text="▶ Preview Audio",
-            width=118, height=28,
+            width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=lambda: self._start_worker(self.preview_audio)
         )
@@ -1568,7 +1585,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_stop_audio = ctk.CTkButton(
             preview_frame,
             text="⏹ Stop Audio",
-            width=118, height=28,
+            width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=self.stop_preview_audio,
             state="disabled"
@@ -1579,7 +1596,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_preview_video = ctk.CTkButton(
             preview_frame,
             text="▶ Preview Video",
-            width=118, height=28,
+            width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=lambda: self._start_worker(self.preview_video)
         )
@@ -1588,7 +1605,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_stop_video = ctk.CTkButton(
             preview_frame,
             text="⏹ Stop Video",
-            width=118, height=28,
+            width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=self.stop_preview_video,
             state="disabled"
@@ -1654,7 +1671,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_cancel_download = ctk.CTkButton(
             progress_row,
             text="⏹ Cancel Download",
-            width=150, height=28,
+            width=150, height=UITheme.H_SM,
             cursor="hand2",
             command=self._cancel_active_download,
             state="disabled",
@@ -1675,7 +1692,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.btn_choose_folder = ctk.CTkButton(
             settings_row,
             text="📁 Change Save Folder",
-            width=175, height=30,
+            width=175, height=UITheme.H_CTRL,
             cursor="hand2",
             command=self._choose_save_folder,
         )
@@ -1732,13 +1749,13 @@ class UniversalAudioStudio(ctk.CTk):
         controls_row.pack(pady=(0, 4))
 
         self.btn_add_to_queue = ctk.CTkButton(
-            controls_row, text="➕ Add to Queue", width=130, height=28,
+            controls_row, text="➕ Add to Queue", width=130, height=UITheme.H_SM,
             command=self._add_current_to_queue)
         self.btn_add_to_queue.pack(side="left", padx=(0, 8))
         self._style_button(self.btn_add_to_queue, "secondary")
 
         self.btn_edit_tags = ctk.CTkButton(
-            controls_row, text="Edit Tags", width=100, height=28,
+            controls_row, text="Edit Tags", width=100, height=UITheme.H_SM,
             command=self._open_tag_editor, state="disabled")
         self.btn_edit_tags.pack(side="left", padx=(8, 0))
         self._style_button(self.btn_edit_tags, "secondary")
@@ -1920,25 +1937,25 @@ class UniversalAudioStudio(ctk.CTk):
         queue_btn_row.pack(pady=(0, 6))
 
         self.btn_queue_start = ctk.CTkButton(
-            queue_btn_row, text="▶ Start", width=90, height=30,
+            queue_btn_row, text="▶ Start", width=90, height=UITheme.H_CTRL,
             command=self._queue_start)
         self.btn_queue_start.pack(side="left", padx=4)
         self._style_button(self.btn_queue_start, "primary")
 
         self.btn_queue_remove = ctk.CTkButton(
-            queue_btn_row, text="🗑 Remove", width=90, height=30,
+            queue_btn_row, text="🗑 Remove", width=90, height=UITheme.H_CTRL,
             command=self._queue_remove_selected)
         self.btn_queue_remove.pack(side="left", padx=4)
         self._style_button(self.btn_queue_remove, "danger")
 
         self.btn_queue_retry = ctk.CTkButton(
-            queue_btn_row, text="↻ Retry", width=90, height=30,
+            queue_btn_row, text="↻ Retry", width=90, height=UITheme.H_CTRL,
             command=self._queue_retry_failed)
         self.btn_queue_retry.pack(side="left", padx=4)
         self._style_button(self.btn_queue_retry, "secondary")
 
         self.btn_queue_cancel = ctk.CTkButton(
-            queue_btn_row, text="✖ Cancel", width=90, height=30,
+            queue_btn_row, text="✖ Cancel", width=90, height=UITheme.H_CTRL,
             command=self._queue_cancel_all)
         self.btn_queue_cancel.pack(side="left", padx=4)
         self._style_button(self.btn_queue_cancel, "danger")
@@ -1950,13 +1967,13 @@ class UniversalAudioStudio(ctk.CTk):
         queue_btn_row2.pack(pady=(0, 10))
 
         self.btn_queue_clear = ctk.CTkButton(
-            queue_btn_row2, text="🧹 Clear", width=90, height=30,
+            queue_btn_row2, text="🧹 Clear", width=90, height=UITheme.H_CTRL,
             command=self._queue_clear)
         self.btn_queue_clear.pack(side="left", padx=4)
         self._style_button(self.btn_queue_clear, "danger")
 
         self.btn_queue_clear_done = ctk.CTkButton(
-            queue_btn_row2, text="✓ Clear Done", width=100, height=30,
+            queue_btn_row2, text="✓ Clear Done", width=100, height=UITheme.H_CTRL,
             command=self._queue_clear_completed)
         self.btn_queue_clear_done.pack(side="left", padx=4)
         self._style_button(self.btn_queue_clear_done, "secondary")
@@ -2093,7 +2110,7 @@ class UniversalAudioStudio(ctk.CTk):
         ctrl_row.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 6))
 
         self.btn_clear_history = ctk.CTkButton(
-            ctrl_row, text="🧹 Clear History", width=140, height=30,
+            ctrl_row, text="🧹 Clear History", width=140, height=UITheme.H_CTRL,
             command=self._clear_history,
         )
         self.btn_clear_history.pack(side="left")
@@ -2108,7 +2125,7 @@ class UniversalAudioStudio(ctk.CTk):
         self.history_search_var = ctk.StringVar()
         self.history_search_entry = ctk.CTkEntry(
             search_row, placeholder_text="🔍 Search by title or URL...",
-            textvariable=self.history_search_var, height=32,
+            textvariable=self.history_search_var, height=UITheme.H_FIELD,
             corner_radius=UITheme.RADIUS_FIELD,
             border_width=UITheme.BORDER_W,
             border_color=(getattr(self, "_palette", {}) or {}).get(
@@ -2126,7 +2143,7 @@ class UniversalAudioStudio(ctk.CTk):
         ctk.CTkLabel(sort_row, text="Sort by:", font=UITheme.F(11), text_color="#95a5a6").pack(side="left")
         for lbl, key in [("Date", "date"), ("Title", "title"), ("Status", "status")]:
             btn = ctk.CTkButton(
-                sort_row, text=lbl, width=60, height=24,
+                sort_row, text=lbl, width=60, height=UITheme.H_XS,
                 font=UITheme.F(10),
                 command=lambda k=key: self._set_history_sort(k),
             )
@@ -2292,7 +2309,7 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Re-download button
         btn_redl = ctk.CTkButton(
-            right, text="↻", width=34, height=28,
+            right, text="↻", width=34, height=UITheme.H_SM,
             command=lambda u=url, v=is_video: self._redownload(u, v),
         )
         self._style_button(btn_redl, "primary")
@@ -2305,7 +2322,7 @@ class UniversalAudioStudio(ctk.CTk):
         # Open file button (only if file exists)
         if file_exists:
             btn_open = ctk.CTkButton(
-                right, text="📂", width=34, height=28,
+                right, text="📂", width=34, height=UITheme.H_SM,
                 command=lambda p=filepath: self._open_file(p),
             )
             self._style_button(btn_open, "secondary")
@@ -2475,7 +2492,7 @@ class UniversalAudioStudio(ctk.CTk):
             except Exception:
                 pass
 
-        ctk.CTkButton(row, text="OK", width=104, height=36,
+        ctk.CTkButton(row, text="OK", width=104, height=UITheme.H_LG,
                       corner_radius=UITheme.RADIUS_MD,
                       fg_color=accent,
                       hover_color=accent_hover, text_color=on_accent,
@@ -2490,7 +2507,7 @@ class UniversalAudioStudio(ctk.CTk):
                 except Exception:
                     logger.exception("Could not copy dialog detail")
 
-            ctk.CTkButton(row, text="Copy details", width=112, height=36,
+            ctk.CTkButton(row, text="Copy details", width=112, height=UITheme.H_LG,
                           corner_radius=UITheme.RADIUS_MD,
                           fg_color="transparent", border_width=UITheme.BORDER_W,
                           border_color=pal.get("hover", sub), text_color=sub,
@@ -2506,7 +2523,7 @@ class UniversalAudioStudio(ctk.CTk):
                 except Exception:
                     logger.exception("Dialog action %r failed", action_label)
 
-            ctk.CTkButton(row, text=action_label, width=112, height=36,
+            ctk.CTkButton(row, text=action_label, width=112, height=UITheme.H_LG,
                           corner_radius=UITheme.RADIUS_MD,
                           fg_color="transparent", border_width=UITheme.BORDER_W,
                           border_color=accent, text_color=accent,
@@ -3929,7 +3946,7 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Filename template (yt-dlp output template). Empty = default %(title)s.%(ext)s.
         ctk.CTkLabel(tuning, text="Filename template (optional):", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
-        self.filename_template_entry = ctk.CTkEntry(tuning, width=380, height=28,
+        self.filename_template_entry = ctk.CTkEntry(tuning, width=380, height=UITheme.H_SM,
             placeholder_text="e.g. %(artist)s - %(title)s.%(ext)s  (leave blank for default)")
         self.filename_template_entry.insert(0, str(self._prefs.get("filename_template", "") or ""))
         self.filename_template_entry.pack(anchor="w", padx=16, pady=(0, 4))
@@ -5034,6 +5051,159 @@ class UniversalAudioStudio(ctk.CTk):
         "ghost":     {"hover_color": "hover"},
     }
 
+    # --- Keyboard and pointer feedback ------------------------------------
+    # CustomTkinter draws no focus ring of its own and has no pressed colour, so
+    # both halves of "I did something" are missing: a keyboard user cannot see
+    # where Tab is, and a mouse user sees nothing between press and release.
+    # Neither needs per-widget code - one traversal list, one ring, one bind.
+
+    def _collect_focusables(self) -> int:
+        """List the controls Tab should visit, in build order, and bind the keys.
+
+        Tk's own traversal walks CustomTkinter's internals, so the order is taken
+        from the widget tree instead: the things a keyboard can actually operate,
+        in the order the app built them, which is the order they read on screen.
+        """
+        wanted = (ctk.CTkButton, ctk.CTkEntry, ctk.CTkCheckBox, ctk.CTkSlider,
+                  ctk.CTkOptionMenu, ctk.CTkComboBox, ctk.CTkRadioButton)
+        # Only what is on screen. The pages are stacked with place(), so a
+        # control on a page that is not showing is unmapped: Tk cannot route a
+        # keypress to it, and Tab that lands on one shows a ring around something
+        # the user cannot see. Page switches rebuild the list.
+        self._focusables = [w for w in self._iter_widgets()
+                            if isinstance(w, wanted) and w.winfo_ismapped()]
+        self._focus_saved = None
+        self._focus_index = -1
+        self._press_saved = None
+        self.bind("<Tab>", lambda _e: self._focus_step(1))
+        self.bind("<Shift-Tab>", lambda _e: self._focus_step(-1))
+        self.bind("<ISO_Left_Tab>", lambda _e: self._focus_step(-1))
+        # A checkbox is operable from the keyboard the same way a button is, and
+        # CustomTkinter binds no keys to it either.
+        for w in self._focusables:
+            toggle = getattr(w, "toggle", None)
+            if not isinstance(w, ctk.CTkCheckBox) or toggle is None:
+                continue
+            try:
+                w.bind("<Return>", lambda _e, t=toggle: t(), add="+")
+                w.bind("<space>", lambda _e, t=toggle: t(), add="+")
+            except Exception:
+                pass
+        # A press anywhere means the mouse is driving; the ring would only lie.
+        self.bind("<Button-1>", lambda _e: self._set_focus_ring(None), add=True)
+        self.bind("<FocusOut>", lambda _e: self._set_focus_ring(None))
+        return len(self._focusables)
+
+    @staticmethod
+    def _focus_target(widget):
+        """The widget that has to hold focus for *widget* to answer the keyboard.
+
+        CustomTkinter's ``bind()`` puts the binding on the canvas and the labels
+        *inside* a control, so focusing the control itself leaves the key
+        bindings behind: Tab walked the ring round nicely and Enter did nothing.
+        Several widgets also forward ``focus_set()`` to the same place. An entry
+        wants focus on its own text widget either way, which is where the caret
+        has to be.
+        """
+        for attr in ("_entry", "_canvas"):
+            inner = getattr(widget, attr, None)
+            if inner is not None:
+                return inner
+        return widget
+
+    def _focus_step(self, delta: int) -> str:
+        """Move the keyboard focus one control along and ring where it landed.
+
+        The position is tracked here rather than read back from ``focus_get()``:
+        several CustomTkinter widgets forward focus to an internal canvas, so the
+        widget that ends up focused is often not the one on the list. The list is
+        rebuilt as it goes, because a page switch can leave it holding controls
+        that are no longer on screen.
+        """
+        widgets = []
+        for w in getattr(self, "_focusables", []):
+            try:
+                if w.winfo_exists() and w.winfo_ismapped():
+                    widgets.append(w)
+            except Exception:
+                continue
+        if not widgets:
+            return "break"
+        index = (getattr(self, "_focus_index", -1) + delta) % len(widgets)
+        target = widgets[index]
+        try:
+            self._focus_target(target).focus_set()
+        except Exception:
+            return "break"
+        self._focus_index = index
+        self._set_focus_ring(target)
+        return "break"
+
+    def _set_focus_ring(self, widget) -> None:
+        """Ring *widget* in the accent, or clear the ring when given None.
+
+        The border that was there before is saved and put back exactly: a ghost
+        button had no border to begin with, and a filled one had the card's edge,
+        so restoring anything else would leave a mark the mouse path never made.
+        """
+        self._restore_focus_ring()
+        if widget is None:
+            return
+        pal = getattr(self, "_palette", {}) or {}
+        try:
+            self._focus_saved = (widget, widget.cget("border_width"),
+                                 widget.cget("border_color"))
+            widget.configure(border_width=UITheme.BORDER_W,
+                             border_color=pal.get("accent",
+                                                  UITheme.COLOR_PRIMARY))
+        except Exception:
+            self._focus_saved = None
+
+    def _restore_focus_ring(self) -> None:
+        saved = getattr(self, "_focus_saved", None)
+        self._focus_saved = None
+        if not saved:
+            return
+        widget, width, color = saved
+        try:
+            widget.configure(border_width=width, border_color=color)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _press_tint(fill: str) -> str:
+        """A held-down version of *fill*: away from its own background."""
+        try:
+            dark = _rel_luminance(fill) < 0.45
+        except Exception:
+            dark = True
+        return _mix(fill, "#000000", 0.20) if dark else _mix(fill, "#ffffff", 0.24)
+
+    def _press_in(self, btn) -> None:
+        """Darken a button for as long as it is held."""
+        try:
+            fill = str(btn.cget("fg_color") or "")
+        except Exception:
+            return
+        if fill in ("", "transparent"):
+            return          # a ghost button has no fill to deepen
+        try:
+            self._press_saved = (btn, fill)
+            btn.configure(fg_color=self._press_tint(fill))
+        except Exception:
+            self._press_saved = None
+
+    def _press_out(self, btn) -> None:
+        """Put the button's own fill back."""
+        saved = getattr(self, "_press_saved", None)
+        if not saved or saved[0] is not btn:
+            return
+        try:
+            btn.configure(fg_color=saved[1])
+        except Exception:
+            pass
+        self._press_saved = None
+
     def _style_button(self, btn, role: str, bordered: bool = True):
         """Paint *btn* with the semantic palette *role*.
 
@@ -5092,6 +5262,24 @@ class UniversalAudioStudio(ctk.CTk):
             if colors.get("border_color"):
                 tag["border_color"] = "hover"
             setattr(btn, "_theme_roles", tag)
+        except Exception:
+            pass
+        # Press feedback. CTk gives a button a hover_color but no pressed color,
+        # so a click used to show nothing at all until the pointer came back off
+        # it. These go on additively so CTk's own click handling still runs.
+        try:
+            btn.bind("<ButtonPress-1>",
+                     lambda _e, b=btn: self._press_in(b), add="+")
+            btn.bind("<ButtonRelease-1>",
+                     lambda _e, b=btn: self._press_out(b), add="+")
+            btn.bind("<Leave>", lambda _e, b=btn: self._press_out(b), add="+")
+            # ... and CustomTkinter binds no keys at all, so a button that has
+            # been tabbed to cannot be pressed from the keyboard. Enter and space
+            # are what every other control answers to, and invoke() is the same
+            # path a click takes.
+            btn.bind("<Return>", lambda _e, b=btn: b.invoke(), add="+")
+            btn.bind("<KP_Enter>", lambda _e, b=btn: b.invoke(), add="+")
+            btn.bind("<space>", lambda _e, b=btn: b.invoke(), add="+")
         except Exception:
             pass
         return btn

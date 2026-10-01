@@ -1228,6 +1228,79 @@ class RailIconTests(unittest.TestCase):
                       _method_source("_sb_set_footer_word"))
 
 
+class KeyboardAndPressTests(unittest.TestCase):
+    """Tab has to go somewhere visible, and a click has to look like a click."""
+
+    def test_the_traversal_only_visits_controls_that_are_on_screen(self):
+        body = _method_source("_collect_focusables")
+        # Pages are stacked with place(): a control on a page that is not
+        # showing is unmapped, and Tab that lands on one rings something the
+        # user cannot see.
+        self.assertIn("winfo_ismapped()", body)
+        self.assertIn("CTkButton", body)
+        self.assertIn('self.bind("<Tab>"', body)
+        self.assertIn('self.bind("<Shift-Tab>"', body)
+        self.assertIn("self._collect_focusables()", _source())
+
+    def test_the_focus_lands_where_customtkinter_puts_the_bindings(self):
+        # CTkButton.bind() forwards to the canvas and the labels inside, so
+        # focusing the control itself leaves the key bindings behind: the ring
+        # moved and Enter did nothing.
+        target = _method_source("_focus_target")
+        self.assertIn('"_entry"', target)
+        self.assertIn('"_canvas"', target)
+        self.assertIn("self._focus_target(target).focus_set()",
+                      _method_source("_focus_step"))
+
+    def test_buttons_and_checkboxes_answer_to_the_keyboard(self):
+        body = _method_source("_style_button")
+        self.assertIn('btn.bind("<Return>"', body)
+        self.assertIn('btn.bind("<space>"', body)
+        self.assertIn("b.invoke()", body)      # the same path a click takes
+        self.assertIn("CTkCheckBox", _method_source("_collect_focusables"))
+        self.assertIn("toggle", _method_source("_collect_focusables"))
+
+    def test_a_held_button_shows_a_press_and_gives_its_fill_back(self):
+        style = _method_source("_style_button")
+        self.assertIn("self._press_in(b)", style)
+        self.assertIn("self._press_out(b)", style)
+        self.assertIn("_mix(fill", _method_source("_press_tint"))
+        self.assertIn("fg_color=saved[1]", _method_source("_press_out"))
+        # A ghost button has no fill to deepen, and must not be given one.
+        self.assertIn('"transparent"', _method_source("_press_in"))
+
+    def test_the_ring_puts_the_border_it_found_back(self):
+        # The control left behind has to look exactly as the mouse left it: a
+        # ghost button had no border and a filled one had the card's edge.
+        ring = _method_source("_set_focus_ring")
+        self.assertIn("self._restore_focus_ring()", ring)
+        self.assertIn("UITheme.BORDER_W", ring)
+        self.assertIn("border_width=width, border_color=color",
+                      _method_source("_restore_focus_ring"))
+        self.assertIn('self.bind("<Button-1>"', _method_source("_collect_focusables"))
+
+
+class ControlHeightScaleTests(unittest.TestCase):
+    """Control heights come from a named scale, not from a spread of numbers."""
+
+    def test_the_scale_is_ordered_and_its_names_are_used(self):
+        from ui import UITheme as T
+        scale = [T.H_XS, T.H_SM, T.H_CTRL, T.H_FIELD, T.H_LG]
+        self.assertEqual(scale, sorted(scale))
+        self.assertEqual(len(set(scale)), 5)
+        src = _source()
+        for token in ("H_XS", "H_SM", "H_CTRL", "H_FIELD", "H_LG"):
+            self.assertIn(f"UITheme.{token}", src)
+
+    def test_no_control_height_is_a_bare_number_again(self):
+        # 24/28/30/32/36 all appeared at call sites, which is how two controls
+        # that end up side by side drift a couple of pixels apart.
+        src = _source()
+        for bare in ("height=24", "height=28", "height=30", "height=32",
+                     "height=36"):
+            self.assertNotIn(bare, src, f"{bare} is a bare literal again")
+
+
 class AppIconTests(unittest.TestCase):
     """The window, the .exe and the shortcuts all wear the same mark."""
 
