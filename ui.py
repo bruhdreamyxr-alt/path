@@ -46,9 +46,10 @@ if TYPE_CHECKING:
 
 
 try:
-    from PIL import Image, ImageSequence
+    from PIL import Image, ImageDraw, ImageSequence
 except Exception:
     Image = None
+    ImageDraw = None
     ImageSequence = None
 
 # Heavy imports deferred until actually needed
@@ -222,6 +223,42 @@ def _icon_shapes(name: str) -> tuple[tuple[Any, ...], ...]:
         return (('disc', 8.6, 17.4, 3.2),
                 ('line', 11.8, 17.4, 11.8, 5.6),
                 ('poly', [(11.8, 5.6), (17.6, 7.8), (17.6, 11.4)]))
+    if name == 'play':
+        # A solid triangle, not a text "play" character: the glyph in a UI font
+        # sits on the font's baseline at the font's own weight, so it never
+        # matched the drawn marks around it. Centred by its own bounding box,
+        # which is what the centring check measures.
+        return (('polyfill', [(7.2, 4.8), (16.8, 12), (7.2, 19.2)]),)
+    if name == 'stop':
+        return (('polyfill', [(7.4, 7.4), (16.6, 7.4), (16.6, 16.6),
+                              (7.4, 16.6)]),)
+    if name == 'close':
+        return (('line', 7.4, 7.4, 16.6, 16.6),
+                ('line', 16.6, 7.4, 7.4, 16.6))
+    if name == 'check':
+        return (('poly', [(5, 12.4), (9.7, 17.2), (19, 6.8)]),)
+    if name == 'plus':
+        return (('line', 12, 5.8, 12, 18.2),
+                ('line', 5.8, 12, 18.2, 12))
+    if name == 'refresh':
+        # An arc with a gap, and an arrowhead on the end that opens it. The gap
+        # is what makes it read as "again" rather than as a plain circle.
+        return (('arc', 12, 12, 7.8, 30, 290),
+                ('polyfill', [(19.6, 6.4), (14.9, 5.6), (17.4, 9.4)]))
+    if name == 'trash':
+        return (('line', 4.4, 7, 19.6, 7),
+                ('poly', [(9, 7), (9, 4.6), (15, 4.6), (15, 7)]),
+                ('poly', [(6.4, 7), (7.5, 20), (16.5, 20), (17.6, 7), (6.4, 7)]),
+                ('line', 10.4, 10.6, 10.8, 17.2),
+                ('line', 13.6, 10.6, 13.2, 17.2))
+    if name == 'folder':
+        # Closed outline (the first point repeated), with the tab on the left so
+        # it reads as a folder and not as a plain box.
+        return (('poly', [(3.2, 19.4), (3.2, 5.6), (9.4, 5.6), (11.6, 8.4),
+                          (20.8, 8.4), (20.8, 19.4), (3.2, 19.4)]),)
+    if name == 'search':
+        return (('oval', 10.4, 10.4, 6.2),
+                ('line', 15, 15, 20.2, 20.2))
     if name == 'chevron_left':
         return (('poly', [(14.4, 6.4), (8.4, 12), (14.4, 17.6)]),)
     if name == 'chevron_right':
@@ -286,6 +323,11 @@ def _paint_icon(canvas, name, color, size=None, width=2):
                                   outline=color, width=width, tags="icon")
                 canvas.create_oval(*box(*rest), outline=color,
                                    width=width, tags="icon")
+            elif kind == 'arc':
+                canvas.create_arc(*box(*rest[0], rest[1], rest[2]),
+                                  start=rest[3], extent=rest[4],
+                                  style="arc", outline=color, width=width,
+                                  capstyle="round", tags="icon")
             else:
                 continue
             drawn += 1
@@ -293,6 +335,85 @@ def _paint_icon(canvas, name, color, size=None, width=2):
             continue
     return drawn
 
+
+
+_ICON_SS = 4
+
+
+def _render_icon_image(name, color, px):
+    """Rasterise drawn icon *name* to a PIL RGBA image, or None.
+
+    Buttons cannot host a canvas the way the rail does (CustomTkinter lays its
+    own label out over the button and only ``image=`` is offered), so a mark for
+    a button has to arrive as a picture. Rather than a second, hand-drawn set
+    of bitmaps, this walks the *same* ``_icon_shapes`` geometry the rail uses,
+    so a button icon and a rail icon of the same name are the same drawing.
+
+    Drawn four times oversize and then downsampled: Tk's canvas strokes are
+    antialiased and Pillow's are not, and at 18px the difference is the whole
+    icon looking cheap. Returns None when Pillow is missing, so the caller can
+    fall back to a text-only label instead of losing the control.
+    """
+    shapes = _icon_shapes(name)
+    if not shapes or Image is None or px <= 0:
+        return None
+    side = int(px) * _ICON_SS
+    k = side / float(_ICON_GRID)
+    stroke = max(1, int(round(2 * k)))
+    try:
+        r, g, b = (int(str(color).lstrip("#")[i:i + 2], 16)
+                   for i in (0, 2, 4))
+    except Exception:
+        return None
+    ink = (r, g, b, 255)
+    try:
+        img = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        def pt(x, y):
+            return (x * k, y * k)
+
+        def box(cx, cy, rad):
+            return (cx * k - rad * k, cy * k - rad * k,
+                    cx * k + rad * k, cy * k + rad * k)
+
+        def cap(x, y):
+            # Tk draws a line with round caps; Pillow has no cap style, so the
+            # ends get the dot that stands in for one.
+            draw.ellipse(box(x, y, stroke / 2.0 / k), fill=ink)
+
+        for shape in shapes:
+            kind, rest = shape[0], shape[1:]
+            if kind == "line":
+                draw.line([pt(rest[0], rest[1]), pt(rest[2], rest[3])],
+                          fill=ink, width=stroke)
+                cap(rest[0], rest[1])
+                cap(rest[2], rest[3])
+            elif kind == "poly":
+                points = [pt(x, y) for x, y in rest[0]]
+                draw.line(points, fill=ink, width=stroke, joint="curve")
+                cap(*rest[0][0])
+                cap(*rest[0][-1])
+            elif kind == "polyfill":
+                draw.polygon([pt(x, y) for x, y in rest[0]], fill=ink)
+            elif kind == "oval":
+                draw.ellipse(box(*rest), outline=ink, width=stroke)
+            elif kind == "disc":
+                draw.ellipse(box(*rest), fill=ink)
+            elif kind == "half":
+                draw.pieslice(box(*rest), 90, 270, fill=ink)
+                draw.ellipse(box(*rest), outline=ink, width=stroke)
+            elif kind == "arc":
+                # Tk and Pillow agree here: both measure from 3 o'clock and
+                # both sweep with the y axis pointing down, so the angles pass
+                # through untouched. An extent that wraps past 360 is fine for
+                # either - both keep going clockwise.
+                draw.arc(box(rest[0], rest[1], rest[2]), rest[3],
+                         rest[3] + rest[4], fill=ink, width=stroke)
+        return img.resize((int(px), int(px)), Image.LANCZOS)
+    except Exception:
+        logger.debug("Rendering icon %r failed", name, exc_info=True)
+        return None
 
 
 def _ring_color(ring, fill, base):
@@ -886,7 +1007,6 @@ class UniversalAudioStudio(ctk.CTk):
             "soundcloud_direct_first": True,
             "save_folder": "",
             "audio_format": "mp3_vbr",
-            "filename_template": "",
             "window_geometry": "",
             "window_maximized": False,
         }
@@ -1529,17 +1649,25 @@ class UniversalAudioStudio(ctk.CTk):
         # Inline clear button: overlays the field's right edge and only shows
         # while there is text to clear (Escape does the same from the keyboard).
         self.btn_clear_url = ctk.CTkButton(
-            self.url_entry, text="✕", width=24, height=UITheme.H_XS,
+            self.url_entry, text="", width=24, height=UITheme.H_XS,
             fg_color="transparent", corner_radius=12, cursor="hand2",
             command=self._on_clear_url_clicked,
         )
-        self._style_button(self.btn_clear_url, "ghost", bordered=False)
+        self._style_button(self.btn_clear_url, "ghost", bordered=False,
+                           icon="close")
         try:
-            # The ✕ should read as muted (sub), not full-strength text.
+            # The X should read as muted (sub), not full-strength text.
             sub = (getattr(self, "_palette", {}) or {}).get("sub", "#95a5a6")
             self.btn_clear_url.configure(text_color=sub)
             setattr(self.btn_clear_url, "_theme_roles",
                     {**self._BTN_ROLES["ghost"], "text_color": "sub"})
+            # _style_button drew the icon in the ghost label colour; the mark
+            # has to be redrawn in the muted one or it sits brighter than the
+            # control it belongs to.
+            setattr(self.btn_clear_url, "_icon_ink", "sub")
+            image = self._button_icon("close", sub)
+            if image is not None:
+                self.btn_clear_url.configure(image=image)
         except Exception:
             pass
         self._url_clear_btn_visible = False
@@ -1575,43 +1703,43 @@ class UniversalAudioStudio(ctk.CTk):
 
         self.btn_preview_audio = ctk.CTkButton(
             preview_frame,
-            text="▶ Preview Audio",
+            text="Preview Audio",
             width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=lambda: self._start_worker(self.preview_audio)
         )
         self.btn_preview_audio.grid(row=0, column=0, padx=4)
-        self._style_button(self.btn_preview_audio, "secondary")
+        self._style_button(self.btn_preview_audio, "secondary", icon="play")
         self.btn_stop_audio = ctk.CTkButton(
             preview_frame,
-            text="⏹ Stop Audio",
+            text="Stop Audio",
             width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=self.stop_preview_audio,
             state="disabled"
         )
         self.btn_stop_audio.grid(row=0, column=1, padx=4)
-        self._style_button(self.btn_stop_audio, "danger")
+        self._style_button(self.btn_stop_audio, "danger", icon="stop")
 
         self.btn_preview_video = ctk.CTkButton(
             preview_frame,
-            text="▶ Preview Video",
+            text="Preview Video",
             width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=lambda: self._start_worker(self.preview_video)
         )
         self.btn_preview_video.grid(row=0, column=2, padx=4)
-        self._style_button(self.btn_preview_video, "secondary")
+        self._style_button(self.btn_preview_video, "secondary", icon="play")
         self.btn_stop_video = ctk.CTkButton(
             preview_frame,
-            text="⏹ Stop Video",
+            text="Stop Video",
             width=118, height=UITheme.H_SM,
             cursor="hand2",
             command=self.stop_preview_video,
             state="disabled"
         )
         self.btn_stop_video.grid(row=0, column=3, padx=4)
-        self._style_button(self.btn_stop_video, "danger")
+        self._style_button(self.btn_stop_video, "danger", icon="stop")
 
         self.url_entry.bind("<Enter>", lambda e: self._set_hover_detail("Paste link or search song. Spotify links are auto-converted.", "#bdc3c7"))
         self.url_entry.bind("<Leave>", lambda e: self._restore_hover_detail())
@@ -1670,14 +1798,14 @@ class UniversalAudioStudio(ctk.CTk):
         self.progress_bar.pack(side="left", fill="x", expand=True)
         self.btn_cancel_download = ctk.CTkButton(
             progress_row,
-            text="⏹ Cancel Download",
+            text="Cancel Download",
             width=150, height=UITheme.H_SM,
             cursor="hand2",
             command=self._cancel_active_download,
             state="disabled",
         )
         self.btn_cancel_download.pack(side="left", padx=(10, 0))
-        self._style_button(self.btn_cancel_download, "danger")
+        self._style_button(self.btn_cancel_download, "danger", icon="stop")
 
         self.dl_detail = ctk.CTkLabel(self.tab_downloader, text="", font=UITheme.F(11), text_color="#95a5a6")
         self.dl_detail.pack(pady=(0, 2))
@@ -1691,13 +1819,13 @@ class UniversalAudioStudio(ctk.CTk):
         settings_row.pack(pady=(0, 2))
         self.btn_choose_folder = ctk.CTkButton(
             settings_row,
-            text="📁 Change Save Folder",
+            text="Change Save Folder",
             width=175, height=UITheme.H_CTRL,
             cursor="hand2",
             command=self._choose_save_folder,
         )
         self.btn_choose_folder.pack(side="left", padx=(0, 8))
-        self._style_button(self.btn_choose_folder, "secondary")
+        self._style_button(self.btn_choose_folder, "secondary", icon="folder")
         ctk.CTkLabel(settings_row, text="Audio quality:", font=UITheme.F(12)).pack(side="left", padx=(0, 8))
         self.fmt_option = ctk.CTkOptionMenu(
             settings_row,
@@ -1759,6 +1887,18 @@ class UniversalAudioStudio(ctk.CTk):
             command=self._open_tag_editor, state="disabled")
         self.btn_edit_tags.pack(side="left", padx=(8, 0))
         self._style_button(self.btn_edit_tags, "secondary")
+
+        # This is the only control in the app that writes tags, so it says which
+        # file it is about to change. An unqualified "Edit Tags" left the user
+        # guessing whether it meant the track they were looking at, and the
+        # filename-template field in Performance read as a second way to do the
+        # same job when it only ever renamed the file on disk.
+        self.tag_target_lbl = ctk.CTkLabel(
+            self.tab_downloader, text="Tags are edited here, after a download.",
+            font=UITheme.F(10), text_color=pal.get("sub", "#95a5a6"),
+        )
+        self.tag_target_lbl.pack(pady=(0, 2))
+        setattr(self.tag_target_lbl, "_theme_roles", {"text_color": "sub"})
 
         self._last_downloaded_file = None
         self._last_dl_was_video = False
@@ -1887,6 +2027,7 @@ class UniversalAudioStudio(ctk.CTk):
             if status == "done":
                 self._last_downloaded_file = getattr(item, 'filepath', None) or self._last_downloaded_file
                 self.btn_edit_tags.configure(state="normal")
+                self._refresh_tag_target()
                 self.update_dl_status(f"Downloaded: {os.path.basename(str(item.filepath) if item.filepath else '')}", "#2ecc71")
                 self._bump_completion_badge()
         self.after(0, _do)
@@ -1937,28 +2078,28 @@ class UniversalAudioStudio(ctk.CTk):
         queue_btn_row.pack(pady=(0, 6))
 
         self.btn_queue_start = ctk.CTkButton(
-            queue_btn_row, text="▶ Start", width=90, height=UITheme.H_CTRL,
+            queue_btn_row, text="Start", width=90, height=UITheme.H_CTRL,
             command=self._queue_start)
         self.btn_queue_start.pack(side="left", padx=4)
-        self._style_button(self.btn_queue_start, "primary")
+        self._style_button(self.btn_queue_start, "primary", icon="play")
 
         self.btn_queue_remove = ctk.CTkButton(
-            queue_btn_row, text="🗑 Remove", width=90, height=UITheme.H_CTRL,
+            queue_btn_row, text="Remove", width=90, height=UITheme.H_CTRL,
             command=self._queue_remove_selected)
         self.btn_queue_remove.pack(side="left", padx=4)
-        self._style_button(self.btn_queue_remove, "danger")
+        self._style_button(self.btn_queue_remove, "danger", icon="trash")
 
         self.btn_queue_retry = ctk.CTkButton(
-            queue_btn_row, text="↻ Retry", width=90, height=UITheme.H_CTRL,
+            queue_btn_row, text="Retry", width=90, height=UITheme.H_CTRL,
             command=self._queue_retry_failed)
         self.btn_queue_retry.pack(side="left", padx=4)
-        self._style_button(self.btn_queue_retry, "secondary")
+        self._style_button(self.btn_queue_retry, "secondary", icon="refresh")
 
         self.btn_queue_cancel = ctk.CTkButton(
-            queue_btn_row, text="✖ Cancel", width=90, height=UITheme.H_CTRL,
+            queue_btn_row, text="Cancel", width=90, height=UITheme.H_CTRL,
             command=self._queue_cancel_all)
         self.btn_queue_cancel.pack(side="left", padx=4)
-        self._style_button(self.btn_queue_cancel, "danger")
+        self._style_button(self.btn_queue_cancel, "danger", icon="close")
 
         # Second row: six buttons in one row (~600px) clipped off the right
         # edge at the 800px minimum window width, especially with the
@@ -1967,16 +2108,16 @@ class UniversalAudioStudio(ctk.CTk):
         queue_btn_row2.pack(pady=(0, 10))
 
         self.btn_queue_clear = ctk.CTkButton(
-            queue_btn_row2, text="🧹 Clear", width=90, height=UITheme.H_CTRL,
+            queue_btn_row2, text="Clear", width=90, height=UITheme.H_CTRL,
             command=self._queue_clear)
         self.btn_queue_clear.pack(side="left", padx=4)
-        self._style_button(self.btn_queue_clear, "danger")
+        self._style_button(self.btn_queue_clear, "danger", icon="trash")
 
         self.btn_queue_clear_done = ctk.CTkButton(
-            queue_btn_row2, text="✓ Clear Done", width=100, height=UITheme.H_CTRL,
+            queue_btn_row2, text="Clear Done", width=100, height=UITheme.H_CTRL,
             command=self._queue_clear_completed)
         self.btn_queue_clear_done.pack(side="left", padx=4)
-        self._style_button(self.btn_queue_clear_done, "secondary")
+        self._style_button(self.btn_queue_clear_done, "secondary", icon="check")
 
         self.queue_status = ctk.CTkLabel(self.tab_queue, text="Idle", font=UITheme.F(11),
                                          text_color="#95a5a6")
@@ -1987,8 +2128,8 @@ class UniversalAudioStudio(ctk.CTk):
     @staticmethod
     def _queue_row_label(idx, item, active_idx):
         """Format one queue row; kept pure so tests can pin the rendering."""
-        icon = {"pending": "⏳", "active": "▶", "done": "✓", "failed": "✗",
-                "skipped": "⊘", "cancelled": "⊘"}.get(item.status, "?")
+        icon = {"pending": "○", "active": "▶", "done": "✓", "failed": "✗",
+                "skipped": "⊘", "cancelled": "⊘"}.get(item.status, "○")
         # Show progress hint for the active item (e.g. "▶ [ACTIVE] 45% ...").
         if idx == active_idx and item.status == "active":
             progress = getattr(item, '_progress', None)
@@ -2110,11 +2251,11 @@ class UniversalAudioStudio(ctk.CTk):
         ctrl_row.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 6))
 
         self.btn_clear_history = ctk.CTkButton(
-            ctrl_row, text="🧹 Clear History", width=140, height=UITheme.H_CTRL,
+            ctrl_row, text="Clear History", width=140, height=UITheme.H_CTRL,
             command=self._clear_history,
         )
         self.btn_clear_history.pack(side="left")
-        self._style_button(self.btn_clear_history, "danger")
+        self._style_button(self.btn_clear_history, "danger", icon="trash")
 
         self.history_count_lbl = ctk.CTkLabel(ctrl_row, text="0 entries", font=UITheme.F(12), text_color="#95a5a6")
         self.history_count_lbl.pack(side="left", padx=(12, 0))
@@ -2124,7 +2265,7 @@ class UniversalAudioStudio(ctk.CTk):
         search_row.pack(fill="x", padx=20, pady=(0, 6))
         self.history_search_var = ctk.StringVar()
         self.history_search_entry = ctk.CTkEntry(
-            search_row, placeholder_text="🔍 Search by title or URL...",
+            search_row, placeholder_text="Search by title or URL...",
             textvariable=self.history_search_var, height=UITheme.H_FIELD,
             corner_radius=UITheme.RADIUS_FIELD,
             border_width=UITheme.BORDER_W,
@@ -2292,7 +2433,7 @@ class UniversalAudioStudio(ctk.CTk):
                                  anchor="w", wraplength=380, justify="left")
         title_lbl.pack(anchor="w")
 
-        meta_parts = [f"{'🎬' if is_video else '🎵'} {date_str}"]
+        meta_parts = [f"{'Video' if is_video else 'Audio'}  •  {date_str}"]
         meta_parts.append(f"File: {'✓ exists' if file_exists else '✗ missing'}")
         meta_text = "  |  ".join(meta_parts)
         meta_lbl = ctk.CTkLabel(left, text=meta_text, font=UITheme.F(10),
@@ -2309,10 +2450,10 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Re-download button
         btn_redl = ctk.CTkButton(
-            right, text="↻", width=34, height=UITheme.H_SM,
+            right, text="", width=34, height=UITheme.H_SM,
             command=lambda u=url, v=is_video: self._redownload(u, v),
         )
-        self._style_button(btn_redl, "primary")
+        self._style_button(btn_redl, "primary", icon="refresh")
         btn_redl.pack(side="left", padx=2)
         # Glyph-only buttons get hover tooltips (reusing the sidebar popup,
         # which already avoids the transient-black-flicker traps).
@@ -2322,10 +2463,10 @@ class UniversalAudioStudio(ctk.CTk):
         # Open file button (only if file exists)
         if file_exists:
             btn_open = ctk.CTkButton(
-                right, text="📂", width=34, height=UITheme.H_SM,
+                right, text="", width=34, height=UITheme.H_SM,
                 command=lambda p=filepath: self._open_file(p),
             )
-            self._style_button(btn_open, "secondary")
+            self._style_button(btn_open, "secondary", icon="folder")
             btn_open.pack(side="left", padx=2)
             btn_open.bind("<Enter>", lambda e, b=btn_open: self._schedule_sb_tooltip(b, "Open file", only_when_collapsed=False))
             btn_open.bind("<Leave>", lambda e: self._hide_sb_tooltip())
@@ -2738,6 +2879,21 @@ class UniversalAudioStudio(ctk.CTk):
         """Update the speed/ETA label below the progress bar."""
         self.after(0, lambda: self.dl_speed_lbl.configure(text=speed_text))
 
+    def _tag_target_text(self) -> str:
+        """What the caption under "Edit Tags" says, given what has been saved."""
+        path = getattr(self, "_last_downloaded_file", None)
+        if not path:
+            return "Tags are edited here, after a download."
+        name = os.path.basename(str(path))[:52]
+        return f"Editing tags in: {name}" if name else "Tags are edited here."
+
+    def _refresh_tag_target(self) -> None:
+        """Point the tag caption at the file "Edit Tags" would actually open."""
+        try:
+            self.tag_target_lbl.configure(text=self._tag_target_text())
+        except Exception:
+            pass
+
     def _open_tag_editor(self):
         filepath = self._last_downloaded_file
         if not filepath or not os.path.exists(filepath):
@@ -2910,7 +3066,7 @@ class UniversalAudioStudio(ctk.CTk):
 
             if not info or not info.get("version") or not info.get("download_url"):
                 self.after(0, lambda: self.update_dl_status("Could not reach update server.", "#e74c3c"))
-                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="↻ Check for App Updates"))
+                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="Check for App Updates"))
                 self.after(0, lambda: self.show_toast("No update information available right now.", "warning"))
                 return
 
@@ -2919,7 +3075,7 @@ class UniversalAudioStudio(ctk.CTk):
 
             if not updater.is_newer_version(remote_ver):
                 self.after(0, lambda: self.show_toast(f"You already have the latest version ({local_ver}).", "success"))
-                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="↻ Check for App Updates"))
+                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="Check for App Updates"))
                 return
 
             # Update available -- confirm with the user.
@@ -2951,7 +3107,7 @@ class UniversalAudioStudio(ctk.CTk):
 
             if not result:
                 # User declined (or timed out).
-                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="↻ Check for App Updates"))
+                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="Check for App Updates"))
                 return
 
             self.after(0, lambda: self.update_dl_status(f"Downloading update v{remote_ver}...", "#3498db"))
@@ -2961,7 +3117,7 @@ class UniversalAudioStudio(ctk.CTk):
             if not new_exe_path:
                 self.after(0, lambda: self.update_dl_status("Download failed. Please try again.", "#e74c3c"))
                 self.after(0, lambda: self._show_error_dialog("Update Error", "Failed to download the update."))
-                self.after(0, lambda: self.app_update_btn.configure(state="normal", text=f"↻ Update to v{remote_ver}"))
+                self.after(0, lambda: self.app_update_btn.configure(state="normal", text=f"Update to v{remote_ver}"))
                 return
 
             old_exe_path = sys.executable
@@ -2983,7 +3139,7 @@ class UniversalAudioStudio(ctk.CTk):
                     "Could not start the updater.\n\n"
                     "Either updater_cli.exe is missing, or admin permission "
                     "was declined when Windows asked."))
-                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="↻ Check for App Updates"))
+                self.after(0, lambda: self.app_update_btn.configure(state="normal", text="Check for App Updates"))
                 return
 
             # The updater will replace the EXE and we exit so the file can be replaced.
@@ -3020,7 +3176,7 @@ class UniversalAudioStudio(ctk.CTk):
         """Show the result of the macOS update check."""
         import updater  # local module
 
-        self.app_update_btn.configure(state="normal", text="↻ Check for App Updates")
+        self.app_update_btn.configure(state="normal", text="Check for App Updates")
         remote_ver = (release or {}).get("version")
         if not remote_ver:
             self.update_dl_status("Could not reach update server.", "#e74c3c")
@@ -3604,6 +3760,7 @@ class UniversalAudioStudio(ctk.CTk):
                 if downloaded_file:
                     self._last_downloaded_file = downloaded_file
                     self.btn_edit_tags.configure(state="normal")
+                    self._refresh_tag_target()
                     # Strip the "Mark of the Web" so Windows Defender doesn't
                     # quarantine the file as a suspicious internet download.
                     downloader._strip_zone_identifier(downloaded_file)
@@ -3731,16 +3888,16 @@ class UniversalAudioStudio(ctk.CTk):
 
         self.ctrl_frame = ctk.CTkFrame(self.tab_studio, fg_color="transparent")
         self.ctrl_frame.pack(pady=(6,10))
-        self.btn_play = ctk.CTkButton(self.ctrl_frame, text="▶ Play", width=115, command=self.play_preview)
+        self.btn_play = ctk.CTkButton(self.ctrl_frame, text="Play", width=115, command=self.play_preview)
         self.btn_play.grid(row=0, column=0, padx=6)
-        self._style_button(self.btn_play, "primary")
-        self.btn_stop = ctk.CTkButton(self.ctrl_frame, text="⏹ Stop", width=115, command=self.stop_preview, state="disabled")
+        self._style_button(self.btn_play, "primary", icon="play")
+        self.btn_stop = ctk.CTkButton(self.ctrl_frame, text="Stop", width=115, command=self.stop_preview, state="disabled")
         self.btn_stop.grid(row=0, column=1, padx=6)
-        self._style_button(self.btn_stop, "danger")
+        self._style_button(self.btn_stop, "danger", icon="stop")
 
-        self.btn_export = ctk.CTkButton(self.tab_studio, text="💾 Export Remix", font=UITheme.F(12, "bold"), width=280, height=40, command=self.export_studio_track)
+        self.btn_export = ctk.CTkButton(self.tab_studio, text="Export Remix", font=UITheme.F(12, "bold"), width=280, height=40, command=self.export_studio_track)
         self.btn_export.pack(pady=(4,10))
-        self._style_button(self.btn_export, "primary")
+        self._style_button(self.btn_export, "primary", icon="download")
 
         self.studio_progress_bar = ctk.CTkProgressBar(self.tab_studio, width=300)
         self.studio_progress_bar.set(0)
@@ -3907,12 +4064,24 @@ class UniversalAudioStudio(ctk.CTk):
         _saved_frags = saved["concurrent_fragment_downloads"]
 
         # No label_text: the header title already says "Performance Settings".
+        #
+        # The inset is not decoration. A CTkScrollableFrame is a rounded frame
+        # wrapped around a plain ``tkinter.Canvas``, and that canvas always
+        # paints a square rectangle - packed edge to edge here it covered the
+        # page card's RADIUS_CARD corners and left the one square box in an app
+        # that is otherwise curved. Pulling it in past the radius puts the
+        # canvas's corners on the card's straight edges, where its colour is
+        # the card's own and the square is invisible.
         scroll = ctk.CTkScrollableFrame(self.tab_performance, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=0, pady=0)
+        scroll.pack(fill="both", expand=True,
+                    padx=UITheme.RADIUS_CARD, pady=UITheme.RADIUS_CARD)
 
         # Card 1: download tuning (+ Apply, which commits these controls).
+        # padx is 0 because the scroll frame already provides the page's
+        # inset; the cards still land the same distance from the page edge as
+        # every other control in the app.
         tuning = self._settings_card(scroll, "Downloads")
-        tuning.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 8))
+        tuning.pack(fill="x", padx=0, pady=(0, 8))
 
         self.aria2_var = tk.BooleanVar(value=_saved_aria)
         self.aria2_chk = ctk.CTkCheckBox(tuning, text="Enable aria2 external downloader", variable=self.aria2_var)
@@ -3944,27 +4113,20 @@ class UniversalAudioStudio(ctk.CTk):
         self.video_res_menu.pack(anchor="w", padx=16, pady=(0, 4))
         self._style_option_menu(self.video_res_menu)
 
-        # Filename template (yt-dlp output template). Empty = default %(title)s.%(ext)s.
-        ctk.CTkLabel(tuning, text="Filename template (optional):", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
-        self.filename_template_entry = ctk.CTkEntry(tuning, width=380, height=UITheme.H_SM,
-            placeholder_text="e.g. %(artist)s - %(title)s.%(ext)s  (leave blank for default)")
-        self.filename_template_entry.insert(0, str(self._prefs.get("filename_template", "") or ""))
-        self.filename_template_entry.pack(anchor="w", padx=16, pady=(0, 4))
-
         self.apply_perf_btn = ctk.CTkButton(tuning, text="Apply Performance Settings", command=self.apply_performance_settings, width=260)
         self.apply_perf_btn.pack(anchor="w", padx=16, pady=(6, 14))
         self._style_button(self.apply_perf_btn, "primary")
 
         # Card 2: maintenance actions.
         maint = self._settings_card(scroll, "Maintenance")
-        maint.pack(fill="x", padx=UITheme.PAD_X, pady=(0, 14))
+        maint.pack(fill="x", padx=0, pady=(0, 0))
 
         self.ytdlp_update_btn = ctk.CTkButton(
-            maint, text="⫤ Update yt-dlp", width=260,
+            maint, text="Update yt-dlp", width=260,
             cursor="hand2", command=self.update_ytdlp_clicked,
         )
         self.ytdlp_update_btn.pack(anchor="w", padx=16, pady=(4, 1))
-        self._style_button(self.ytdlp_update_btn, "secondary")
+        self._style_button(self.ytdlp_update_btn, "secondary", icon="download")
         self.ytdlp_ver_lbl = ctk.CTkLabel(
             maint, text=f"yt-dlp version: {downloader.get_ytdlp_version() or 'not detected'}",
             font=UITheme.F(10), text_color="#95a5a6", anchor="w",
@@ -3972,18 +4134,18 @@ class UniversalAudioStudio(ctk.CTk):
         self.ytdlp_ver_lbl.pack(anchor="w", padx=16, pady=(0, 2))
 
         self.app_update_btn = ctk.CTkButton(
-            maint, text="🔄 Check for App Updates", width=260,
+            maint, text="Check for App Updates", width=260,
             cursor="hand2", command=self.check_for_app_updates,
         )
         self.app_update_btn.pack(anchor="w", padx=16, pady=(0, 2))
-        self._style_button(self.app_update_btn, "secondary")
+        self._style_button(self.app_update_btn, "secondary", icon="refresh")
 
         self.clear_cache_btn = ctk.CTkButton(
-            maint, text="🧹 Clear Download Cache", width=260,
+            maint, text="Clear Download Cache", width=260,
             command=self.clear_download_cache,
         )
         self.clear_cache_btn.pack(anchor="w", padx=16, pady=(0, 2))
-        self._style_button(self.clear_cache_btn, "danger")
+        self._style_button(self.clear_cache_btn, "danger", icon="trash")
 
         self.perf_status = ctk.CTkLabel(maint, text="Current: default", font=UITheme.F(11), text_color="#95a5a6", anchor="w")
         self.perf_status.pack(anchor="w", padx=16, pady=(2, 14))
@@ -4000,9 +4162,6 @@ class UniversalAudioStudio(ctk.CTk):
             self._set_pref('use_aria2', cfg['use_aria2'])
             self._set_pref('aria2_connections', cfg['aria2_connections'])
             self._set_pref('concurrent_fragment_downloads', cfg['concurrent_fragment_downloads'])
-            # Persist filename template (stripped; empty = use default)
-            _tmpl = self.filename_template_entry.get().strip()
-            self._set_pref('filename_template', _tmpl)
             self.perf_status.configure(text=f"Current: aria2={cfg['use_aria2']}, conns={cfg['aria2_connections']}, frags={cfg['concurrent_fragment_downloads']}")
             # Honest feedback
             _aria2_path = downloader.get_fast_downloader_path() if cfg['use_aria2'] else None
@@ -5204,7 +5363,68 @@ class UniversalAudioStudio(ctk.CTk):
             pass
         self._press_saved = None
 
-    def _style_button(self, btn, role: str, bordered: bool = True):
+    def _button_icon(self, name: str, ink: str, px: int = 18):
+        """A CTkImage of drawn mark *name* in *ink*, for a button's ``image=``.
+
+        Both appearances are rendered, because CustomTkinter picks between them
+        by the app's appearance mode and the palette owns that mode. Rendering
+        only the current one would leave a button with a dark-on-dark icon the
+        moment the light palettes came round.
+        """
+        cache = getattr(self, "_icon_cache", None)
+        if cache is None:
+            cache = self._icon_cache = {}
+        dark_bg = ctk.get_appearance_mode().lower() != "light"
+        other = _on_color("#ffffff", "#0d1117", "#f5f7fa") if dark_bg \
+            else _on_color("#101418", "#f2f4f8", "#0d1117")
+        key = (name, ink, other, int(px))
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        light = _render_icon_image(name, ink, px)
+        dark = _render_icon_image(name, other, px)
+        if light is None and dark is None:
+            return None
+        try:
+            image = ctk.CTkImage(light_image=light or dark, dark_image=dark or light,
+                                 size=(int(px), int(px)))
+        except Exception:
+            logger.debug("Wrapping icon %r in a CTkImage failed", name,
+                         exc_info=True)
+            return None
+        cache[key] = image
+        return image
+
+    def _refresh_button_icons(self) -> int:
+        """Re-draw every button icon in its button's new label ink.
+
+        A palette switch moves a button's fill, so its label colour can flip
+        between the palette's text tone and its background tone (a yellow
+        accent wants dark letters). The icon has to follow that decision, not
+        the theme it happened to be built under.
+        """
+        cache = getattr(self, "_icon_cache", None)
+        if cache is not None:
+            cache.clear()
+        done = 0
+        for widget in self._iter_widgets():
+            name = getattr(widget, "_icon_name", "")
+            if not name or not isinstance(widget, ctk.CTkButton):
+                continue
+            try:
+                ink = str(widget.cget("text_color") or "")
+                if not ink.startswith("#"):
+                    continue
+                image = self._button_icon(name, ink)
+                if image is None:
+                    continue
+                widget.configure(image=image)
+                done += 1
+            except Exception:
+                logger.debug("Repainting a button icon failed", exc_info=True)
+        return done
+
+    def _style_button(self, btn, role: str, bordered: bool = True, icon: str = ""):
         """Paint *btn* with the semantic palette *role*.
 
         Build-time colors come from the active palette instead of
@@ -5218,6 +5438,11 @@ class UniversalAudioStudio(ctk.CTk):
         never a boxier one), and ghost buttons get the hairline outline
         the dialogs use for secondary actions. Pass ``bordered=False`` for
         a ghost control that already sits inside another outlined widget.
+
+        ``icon`` names a mark in ``_icon_shapes``. It is drawn in whatever
+        ink the label ended up with, so an icon can never drift away from
+        its own button's contrast, and it is remembered for the repaint that
+        a theme switch does.
         """
         pal = getattr(self, "_palette", {}) or {}
         roles = self._BTN_ROLES.get(role)
@@ -5237,6 +5462,17 @@ class UniversalAudioStudio(ctk.CTk):
         else:
             colors["text_color"] = _on_color(
                 fill, pal.get("text", "#ecf0f1"), pal.get("bg", "#1e1e24"))
+        if icon:
+            image = self._button_icon(icon, colors["text_color"])
+            if image is not None:
+                colors["image"] = image
+                colors["compound"] = "left"
+                setattr(btn, "_icon_name", icon)
+                setattr(btn, "_icon_ink", "text_color")
+            else:
+                # No Pillow: a label with a missing picture in it would read as
+                # a rendering fault, so the control keeps its text alone.
+                setattr(btn, "_icon_name", "")
         # Curved ends everywhere: a call site may ask for something rounder
         # (a pill chip) but never boxier than the shared control radius.
         try:
@@ -5401,6 +5637,76 @@ class UniversalAudioStudio(ctk.CTk):
                 break
         return done
 
+    def _style_composites(self, pal=None) -> int:
+        """Repaint the parts of composite widgets that no theme walk reaches.
+
+        Two CustomTkinter widgets keep their colour inside a child the option
+        walk cannot see, which is why both went stale:
+
+        * ``CTkScrollableFrame`` paints a plain ``tkinter.Canvas`` behind its
+          contents and resolves that canvas's colour once, when the frame is
+          built - and afterwards only inside its own ``configure()`` or when the
+          *appearance mode* flips. Switching between two dark palettes changes
+          neither, so the Performance page's scroll well went on showing the
+          background of whichever palette was live at startup while the cards
+          on top of it moved to the new one.
+        * ``CTkOptionMenu`` opens a ``tkinter.Menu``, which is not a CTk widget
+          and so never inherits the menu button's palette: the dropdown list was
+          CustomTkinter's grey in all 21 themes.
+
+        Painted by type, the way ``_style_form_controls`` does, so a widget
+        built later is covered without being named here.
+        """
+        pal = pal or getattr(self, "_palette", {}) or {}
+        trough = pal.get("hover", UITheme.SIDEBAR_HOVER)
+        # The handle is the part the user aims at, so it takes the muted text
+        # tone rather than another surface step the trough would swallow.
+        handle = pal.get("sub", UITheme.COLOR_GRAY)
+        accent = pal.get("accent", UITheme.COLOR_PRIMARY)
+        panel = pal.get("sidebar_active", UITheme.SIDEBAR_ACTIVE)
+        panel_text = _on_color(panel, pal.get("text", "#ecf0f1"),
+                               pal.get("bg", "#1e1e24"))
+        done = 0
+        for widget in self._iter_widgets():
+            try:
+                if isinstance(widget, ctk.CTkScrollableFrame):
+                    # Resolve the well's own fill through its *remembered role*
+                    # first. Its fg_color is a concrete hex captured when the
+                    # frame was built, so keeping that literal is exactly the
+                    # staleness being fixed; the role is what says "this is the
+                    # bg tone", and the palette is what says what that is now.
+                    roles = getattr(widget, "_theme_roles", None) or {}
+                    fill = pal.get(roles.get("fg_color") or "")
+                    if not fill:
+                        try:
+                            fg = widget.cget("fg_color")
+                        except Exception:
+                            fg = None
+                        # A well that says "transparent" is showing whatever card
+                        # it sits on, which is the page surface.
+                        fill = (fg if isinstance(fg, str)
+                                and fg.lower() not in ("transparent", "")
+                                else pal.get("surface", UITheme.SURFACE_BG))
+                    widget._parent_canvas.configure(bg=fill)
+                    # The frame itself is a bare tkinter.Frame; CTk repaints it
+                    # in the same two lines it uses internally.
+                    tk.Frame.configure(widget, bg=fill)
+                    bar = getattr(widget, "_scrollbar", None)
+                    if bar is not None:
+                        bar.configure(fg_color=trough, button_color=handle,
+                                      button_hover_color=accent)
+                    done += 1
+                elif isinstance(widget, ctk.CTkOptionMenu):
+                    dropdown = getattr(widget, "_dropdown_menu", None)
+                    if dropdown is None:
+                        continue
+                    dropdown.configure(fg_color=panel, hover_color=trough,
+                                       text_color=panel_text)
+                    done += 1
+            except Exception:
+                logger.debug("Styling a composite widget failed", exc_info=True)
+        return done
+
     def apply_color_theme(self, name):
         """Apply a named color theme to the entire UI and remember it."""
         pal = COLOR_THEMES.get(name)
@@ -5507,6 +5813,15 @@ class UniversalAudioStudio(ctk.CTk):
         # trough, a checkmark), which is where CTk's own colors leaked in.
         # Every part of a control is set in the one pass below.
         self._style_form_controls(pal)
+        # Scroll wells and option-menu dropdowns keep their colour in children
+        # the role walk above has no option for (a bare Canvas and a
+        # tkinter.Menu), so they are repainted separately - without this the
+        # Performance page's background stayed on the old palette.
+        self._style_composites(pal)
+        # Button icons are pictures, so they do not re-tint themselves the way a
+        # colour option does: each one is redrawn in whatever ink its button's
+        # new label colour resolved to.
+        self._refresh_button_icons()
 
         # Header + rail text accents
         try:
@@ -5789,7 +6104,7 @@ class UniversalAudioStudio(ctk.CTk):
                         os.remove(temp_wav)
                     except Exception:
                         logger.debug("Failed to remove temp wav", exc_info=True)
-                self.after(0, lambda: self.btn_export.configure(text="💾 Render & Export Full Studio Remix Track", state="normal"))
+                self.after(0, lambda: self.btn_export.configure(text="Render & Export Full Studio Remix Track", state="normal"))
 
         self._start_worker(run_export)
 

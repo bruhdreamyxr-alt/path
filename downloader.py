@@ -1020,12 +1020,14 @@ def build_fast_yt_dlp_options(base_dir, output_template, audio_only: bool = Fals
         base_format = 'bestaudio/best'
     else:
         base_format = video_format_string(str(cfg.get('max_video_resolution', 'Best (up to 4K)')))
-    # Use custom filename template if set (yt-dlp output template syntax).
-    _custom_tmpl = str(cfg.get('filename_template', '') or '').strip()
-    _outtmpl = _custom_tmpl if _custom_tmpl else output_template
+    # File names come from media_output_template (a unique post id, so two
+    # downloads of the same title cannot collide). There is no user-supplied
+    # override: an output template typed into the settings was read as a way to
+    # change a track's artist/title, which it never was - it only renames the
+    # file on disk. Tags are edited in one place, from the Downloader page.
     ydl_opts: dict[str, Any] = {
         'format': base_format,
-        'outtmpl': _outtmpl,
+        'outtmpl': output_template,
         'ffmpeg_location': get_ffmpeg_location(),
         'quiet': True,
         'no_warnings': True,

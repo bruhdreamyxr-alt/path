@@ -338,12 +338,28 @@ class QueueRowLabelTests(unittest.TestCase):
         item = SimpleNamespace(status="pending", url=url)
         self.assertEqual(
             self.app._queue_row_label(3, item, 0),
-            "⏳ [  PENDING] " + url[:50],
+            "○ [  PENDING] " + url[:50],
         )
 
     def test_unknown_status_gets_the_placeholder_icon(self):
         item = SimpleNamespace(status="weird", url="u")
-        self.assertTrue(self.app._queue_row_label(0, item, 9).startswith("? "))
+        self.assertTrue(self.app._queue_row_label(0, item, 9).startswith("○ "))
+
+    def test_queue_status_marks_are_plain_geometry(self):
+        """A status column of colour emoji reads as a row of mismatched stickers.
+
+        An emoji brings its own palette, its own size and its own baseline, and
+        no two share a stroke weight - so the marks a queue row shows have to
+        come from one allowlist of geometric characters that a UI font draws the
+        same way every time, rather than from whatever the status is.
+        """
+        allowed = {"○", "▶", "✓", "✗", "⊘"}
+        for status in ("pending", "active", "done", "failed",
+                       "skipped", "cancelled", "weird"):
+            item = SimpleNamespace(status=status, url="u")
+            mark = self.app._queue_row_label(0, item, 9)[0]
+            self.assertIn(mark, allowed,
+                          f"{status} uses {mark!r} (U+{ord(mark):04X})")
 
 
 class TypeTokenTests(unittest.TestCase):
@@ -1155,7 +1171,9 @@ class RailIconTests(unittest.TestCase):
     """The rail's marks are drawn geometry, not emoji out of a system font."""
 
     ICONS = ("download", "queue", "history", "studio", "settings",
-             "performance", "note", "chevron_left", "chevron_right")
+             "performance", "note", "chevron_left", "chevron_right",
+             "play", "stop", "close", "check", "plus", "refresh",
+             "trash", "folder", "search")
 
     @staticmethod
     def _points(shape):
@@ -1166,6 +1184,9 @@ class RailIconTests(unittest.TestCase):
         if kind in ("oval", "disc", "half"):
             cx, cy, r = rest
             return [(cx - r, cy), (cx + r, cy)]
+        if kind == "arc":
+            cx, cy, r = rest[0], rest[1], rest[2]
+            return [(cx - r, cy), (cx + r, cy)]
         return [(rest[0], rest[1]), (rest[2], rest[3])]
 
     def test_no_colour_emoji_are_left_anywhere_in_the_ui(self):
@@ -1174,6 +1195,24 @@ class RailIconTests(unittest.TestCase):
         # the eye read a row of unrelated stickers.
         for glyph in ("⬇", "📋", "🕒", "🎛", "🎨", "⚡", "♪", "«"):
             self.assertNotIn(glyph, _source(), "emoji left in the UI")
+
+    def test_not_one_astral_emoji_character_remains(self):
+        """The whole file, not a hand-picked list of the glyphs we remembered.
+
+        A check that names the emoji it expects to find can only ever catch the
+        ones somebody thought of. Every colour emoji lives above the BMP
+        (U+1F000 and up), so scanning for that range catches all of them -
+        including the ones a future change adds without anyone noticing.
+        """
+        source = _source()
+        # Line 1 comments and the icon docstrings discuss emoji by name; only
+        # the code that reaches a label matters.
+        offenders = sorted({ch for ch in source if ord(ch) >= 0x1F000})
+        self.assertEqual(offenders, [],
+                         f"colour emoji left in the UI: {offenders}")
+        # A variation selector is how a plain-looking character is asked to
+        # render as an emoji, so it is the same problem one codepoint later.
+        self.assertNotIn("️", source, "emoji variation selector left in the UI")
 
     def test_every_nav_row_maps_to_an_icon_that_draws_something(self):
         body = _method_source("_build_sidebar")
