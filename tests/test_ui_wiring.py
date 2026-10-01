@@ -12,13 +12,40 @@ map/unmap, or a full rebuild of the queue rows per progress tick would all
 ship silently.
 """
 import importlib.util
+import json
+import os
 import pathlib
 import re
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 _HAS_CTK = importlib.util.find_spec("customtkinter") is not None
+
+# The custom-theme editor tests drive the real window, so they need ctk and ui.
+# Both are optional for the rest of this file, which is source-level only: the
+# suite has to stay runnable wherever Tk is unavailable (CI lint jobs). They are
+# typed Any so that the None fallback below does not turn every ui.* reference
+# in this file into a type error.
+from typing import Any  # noqa: E402
+
+ctk: Any
+ui: Any
+
+if _HAS_CTK:
+    import sys
+    if str(_REPO) not in sys.path:
+        sys.path.insert(0, str(_REPO))
+    import customtkinter as ctk  # type: ignore[no-redef]
+    import ui  # type: ignore[no-redef]
+else:  # pragma: no cover - only on a machine without Tk
+    ctk = None
+    ui = None
+
+requires_ctk = unittest.skipUnless(
+    _HAS_CTK, "customtkinter/Tk is unavailable in this environment")
 
 
 def _source() -> str:
@@ -1562,6 +1589,479 @@ class AppIconTests(unittest.TestCase):
         iss = (_REPO / "installer_200.iss").read_text(encoding="utf-8")
         self.assertIn("SetupIconFile=assets\\tune_lab.ico", iss)
         self.assertIn('IconFilename: "assets\\tune_lab.ico"', iss)
+
+
+@requires_ctk
+class CustomPaletteTests(unittest.TestCase):
+    """The user-built palette: derivation, validation and persistence.
+
+    No window needed - custom_palette is pure.
+    """
+
+    def test_default_custom_palette_is_complete_and_dark(self):
+        pal = ui.custom_palette()
+        for role in ui.COLOR_THEMES['TuneLab Dark']:
+            self.assertIn(role, pal, "%s missing from default custom palette" % role)
+        self.assertEqual(pal['mode'], 'dark')
+        self.assertEqual(pal['bg'], ui.COLOR_THEMES['TuneLab Dark']['bg'])
+
+    def test_light_base_uses_light_backgrounds(self):
+        pal = ui.custom_palette(mode='light')
+        self.assertEqual(pal['mode'], 'light')
+        self.assertEqual(pal['bg'], ui.COLOR_THEMES['Serika Light']['bg'])
+        # A light base must not inherit the dark theme's text colour.
+        self.assertNotEqual(pal['text'], ui.COLOR_THEMES['TuneLab Dark']['text'])
+
+    def test_hover_shades_are_derived_not_inherited(self):
+        """Editing a base colour must move its hover with it.
+
+        The derived hovers are why a custom palette asks for 12 colours instead
+        of 17. A hover left over from the previous accent would show a pink
+        button shading toward the blue it used to be.
+        """
+        pal = ui.custom_palette({'accent': '#ff0055'})
+        self.assertNotEqual(pal['accent_hover'],
+                            ui.COLOR_THEMES['TuneLab Dark']['accent_hover'])
+        self.assertNotEqual(pal['accent_hover'], pal['accent'])
+        self.assertEqual(pal['accent_hover'],
+                         ui._lift(pal['accent'], 0.18, pal['mode']))
+
+    def test_every_derived_hover_follows_its_base(self):
+        for base_role, hover_role in ui.CUSTOM_THEME_HOVERS.items():
+            pal = ui.custom_palette({base_role: '#00ffaa'})
+            self.assertEqual(pal[hover_role],
+                             ui._lift(pal[base_role], 0.18, pal['mode']),
+                             "%s was not derived from %s" % (hover_role, base_role))
+
+    def test_default_custom_palette_passes_contrast(self):
+        """The starting point has to be usable as-is.
+
+        Someone who opens the card and changes nothing must not be dropped into
+        a palette that already fails - the safety story rests on seeding from
+        something that passes.
+        """
+        self.assertEqual(ui.contrast_failures(ui.custom_palette()), [])
+        self.assertEqual(ui.contrast_failures(ui.custom_palette(mode='light')), [])
+
+    def test_seeding_from_every_preset_passes_contrast(self):
+        """start_custom_from must not be able to produce a failing palette."""
+        for name in ui.COLOR_THEMES:
+            if name == ui.CUSTOM_THEME_NAME:
+                continue
+            src = ui.COLOR_THEMES[name]
+            seeded = ui.custom_palette(
+                {r: src[r] for r in ui.CUSTOM_THEME_ROLES if r in src},
+                src.get('mode') or 'dark')
+            bad = ui.contrast_failures(seeded)
+            self.assertEqual(bad, [], "%s seeds a palette that fails: %s" % (name, bad))
+
+    def test_contrast_failures_names_the_pair_and_ratio(self):
+        pal = ui.custom_palette({'text': '#111111', 'bg': '#222222'})
+        bad = ui.contrast_failures(pal)
+        self.assertTrue(bad)
+        failing = {(fg, bkey) for fg, bkey, _n, _g in bad}
+        self.assertIn(('text', 'bg'), failing)
+        for _fg, _bkey, need, got in bad:
+            self.assertLess(got, need)
+
+    def test_contrast_check_covers_semantics_not_just_body_text(self):
+        """The report must catch an accent that sinks into the surface.
+
+        A check looking only at body text would pass a palette whose status
+        colours vanish - the same failure the curated audit guards against.
+        """
+        pal = ui.custom_palette({'accent': '#101010'})
+        failing = {(fg, bkey) for fg, bkey, _n, _g in ui.contrast_failures(pal)}
+        self.assertTrue(any(fg == 'accent' for fg, _ in failing), failing)
+
+    def test_normalize_hex_accepts_both_forms_and_rejects_junk(self):
+        self.assertEqual(ui._normalize_hex('#ABCDEF'), '#abcdef')
+        self.assertEqual(ui._normalize_hex('  #abc  '), '#aabbcc')
+        for junk in ('', 'red', '#12345', '#gggggg', 'blue-ish', None, 12345):
+            self.assertIsNone(ui._normalize_hex(junk), repr(junk))
+
+    def test_partial_overrides_fall_back_rather_than_break(self):
+        pal = ui.custom_palette({'accent': '#123456'})
+        self.assertEqual(pal['accent'], '#123456')
+        self.assertEqual(pal['bg'], ui.COLOR_THEMES['TuneLab Dark']['bg'])
+
+    def test_invalid_override_is_ignored_not_stored(self):
+        pal = ui.custom_palette({'accent': 'chartreuse', 'text': '#abcdef'})
+        self.assertEqual(pal['accent'], ui.COLOR_THEMES['TuneLab Dark']['accent'])
+        self.assertEqual(pal['text'], '#abcdef')
+
+    def test_every_role_the_card_shows_is_editable(self):
+        """A row shown in the picker must be a role custom_palette accepts.
+
+        Guards against adding a row to the card and forgetting it in the
+        editable list, which would silently drop the user's pick.
+        """
+        for _title, roles in ui.UniversalAudioStudio._CUSTOM_ROLE_GROUPS:
+            for role in roles:
+                pal = ui.custom_palette({role: '#abcdef'})
+                self.assertEqual(pal[role], '#abcdef',
+                                 "%s shown but not editable" % role)
+
+    def test_the_card_shows_every_editable_role_exactly_once(self):
+        """The picker is the whole surface: nothing offered, nothing missed.
+
+        A role in CUSTOM_THEME_ROLES with no row would be unchangeable from the
+        UI while still claiming to be a role, and a row twice would give the
+        user two swatches that disagree.
+        """
+        shown = [r for _t, roles in ui.UniversalAudioStudio._CUSTOM_ROLE_GROUPS
+                 for r in roles]
+        self.assertEqual(sorted(shown), sorted(ui.CUSTOM_THEME_ROLES))
+        self.assertEqual(len(shown), len(set(shown)), "a role is listed twice")
+
+    def test_the_derived_roles_are_not_offered_to_the_user(self):
+        """The two structural steps must stay derived, not pickable.
+
+        ``hover`` is a hairline one step off its neighbour and
+        ``sidebar_active`` is the selected-nav fill. Both are judgements about
+        how close two surfaces should sit; a colour picker cannot make them, and
+        offering them was how the card grew two rows nobody could get right.
+        """
+        shown = {r for _t, roles in ui.UniversalAudioStudio._CUSTOM_ROLE_GROUPS
+                 for r in roles}
+        self.assertFalse(shown & set(ui.CUSTOM_DERIVED_ROLES))
+
+    def test_derived_roles_follow_their_source(self):
+        for derived, (source, amount) in ui.CUSTOM_DERIVED_ROLES.items():
+            pal = ui.custom_palette({source: '#00ffaa'})
+            self.assertEqual(pal[derived],
+                             ui._lift(pal[source], amount, pal['mode']),
+                             "%s was not derived from %s" % (derived, source))
+
+    def test_a_hover_lifts_away_from_the_window_in_both_modes(self):
+        """Hovering a card must make it stand out, never sink into the window.
+
+        The derivation used to mix toward ``bg``, which is only "outward" when
+        the window is darker than the card. Cards are commonly *lighter* than the
+        window in dark mode, and there the hover came out darker than the card it
+        belonged to - the row looked erased rather than pressed. Dark mode lifts
+        toward white, light mode drops toward black, and both must be verifiable
+        without reading the mix direction.
+        """
+        for mode, sign in (('dark', 1), ('light', -1)):
+            for roles in ({'bg': '#101014', 'surface': '#2a2a30'},
+                          {'bg': '#333338', 'surface': '#22222a'}):
+                pal = ui.custom_palette(roles, mode)
+                self.assertNotEqual(pal['hover'], pal['surface'],
+                                    "hover is invisible in %s" % mode)
+                # sign +1 = must get lighter in dark mode, -1 = darker in light.
+                moved = sign * (ui._rel_luminance(pal['hover'])
+                                - ui._rel_luminance(pal['surface']))
+                self.assertGreater(moved, 0,
+                                   "hover did not move away from the window "
+                                   "in %s mode" % mode)
+
+    def test_every_seeded_preset_still_passes_the_contrast_report(self):
+        """The lift must not trade a correct hover for an unreadable palette.
+
+        Lifting made sidebar_active lighter, which eats into its own 'sub'
+        contrast; the derived amounts are tuned against exactly this.
+        """
+        for name, src in ui.COLOR_THEMES.items():
+            seeded = ui.custom_palette(
+                {r: src[r] for r in ui.CUSTOM_THEME_ROLES if r in src},
+                src.get('mode') or 'dark')
+            self.assertEqual(ui.contrast_failures(seeded), [], name)
+
+    def test_editing_a_background_role_moves_the_derived_steps(self):
+        """The point of deriving them: one edit repaints all three surfaces.
+
+        If the derivation lagged, the card border and the selected-nav fill
+        would stay on the previous palette - the exact class of stale-colour
+        bug the role walk was built to prevent.
+        """
+        pal = ui.custom_palette({'surface': '#203040'}, 'dark')
+        self.assertEqual(pal['hover'],
+                         ui._lift('#203040', ui.CUSTOM_DERIVED_ROLES['hover'][1],
+                                  'dark'))
+        pal = ui.custom_palette({'sidebar': '#301030'}, 'dark')
+        self.assertEqual(
+            pal['sidebar_active'],
+            ui._lift('#301030', ui.CUSTOM_DERIVED_ROLES['sidebar_active'][1],
+                     'dark'))
+
+    def test_custom_palette_survives_a_round_trip_through_prefs(self):
+        """Roles are saved raw; the palette is rebuilt from them on load."""
+        roles = {'accent': '#ff0055', 'bg': '#101014'}
+        pal = ui.custom_palette(roles, 'dark')
+        rebuilt = ui.custom_palette(dict(roles), 'dark')
+        self.assertEqual(pal, rebuilt)
+        self.assertEqual(pal['accent_hover'], rebuilt['accent_hover'])
+
+    def test_every_start_from_option_exists(self):
+        for name in ui.UniversalAudioStudio._CUSTOM_START_THEMES:
+            self.assertIn(name, ui.COLOR_THEMES, name)
+
+    def test_start_from_options_exclude_the_custom_entry(self):
+        """Copying My Theme onto itself would freeze the current picks."""
+        self.assertNotIn(ui.CUSTOM_THEME_NAME,
+                         ui.UniversalAudioStudio._CUSTOM_START_THEMES)
+
+
+@requires_ctk
+class CustomThemeEditorTests(unittest.TestCase):
+    """The custom editor wired into the running window."""
+
+    def setUp(self):
+        # Redirect prefs into a temp file for the whole construction, not just
+        # the writes: set_custom_role persists, and the default path is the real
+        # ui_prefs.json beside ui.py when running from source. Without this the
+        # suite both rewrites the user's saved settings and *reads* whatever a
+        # previous run left there, so a test could pass on one machine and fail
+        # on the next. Patching the path resolver is the only seam that covers
+        # the load in __init__ as well as every later save.
+        self._tmpdir = tempfile.TemporaryDirectory()
+        temp_pref = os.path.join(self._tmpdir.name, "ui_prefs.json")
+        # Bound via a default argument, not `self`: as a method the lambda's
+        # `self` is the *app*, which would shadow this TestCase.
+        patcher = mock.patch.object(
+            ui.UniversalAudioStudio, "_get_pref_path",
+            lambda _app, _p=temp_pref: _p)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.app = ui.UniversalAudioStudio()
+        self.app.withdraw()
+        self.app.update_idletasks()
+        self._pref_path = self.app._pref_path
+
+    def tearDown(self):
+        try:
+            self.app.destroy()
+        except Exception:
+            pass
+        self._tmpdir.cleanup()
+
+    def _rebuild_with_prefs(self, prefs):
+        """Reconstruct the app against a given prefs dict.
+
+        The load happens in __init__, so a test that wants to observe how a
+        prefs file is read has to stand the window up again around it. The first
+        instance is torn down first so the temp file is not left open by a
+        lingering Tk.
+        """
+        try:
+            self.app.destroy()
+        except Exception:
+            pass
+        with open(self._pref_path, "w", encoding="utf-8") as fh:
+            json.dump(prefs, fh)
+        self.app = ui.UniversalAudioStudio()
+        self.app.withdraw()
+        self.app.update_idletasks()
+        return self.app
+
+    def test_a_derived_role_saved_by_an_older_build_is_dropped_on_load(self):
+        """A prefs file may still name a role the picker no longer offers.
+
+        ``hover`` was pickable before it became derived. Reading such a file
+        must not resurrect the key: the value is ignored when the palette is
+        built anyway, so keeping it would only mean the next save writes back a
+        colour the UI can neither show nor change - a preference that survives
+        every reset.
+        """
+        app = self._rebuild_with_prefs(
+            {'color_theme': ui.CUSTOM_THEME_NAME,
+             'custom_theme_roles': {'accent': '#ff0055', 'hover': '#8b0735'},
+             'custom_theme_mode': 'dark'})
+        self.assertNotIn('hover', app._custom_roles)
+        self.assertEqual(app._custom_roles, {'accent': '#ff0055'})
+        # And the dead key must not come back on the next write.
+        app.set_custom_role('bg', '#123456')
+        self.assertNotIn('hover', app._prefs['custom_theme_roles'])
+
+    def test_a_non_dict_custom_roles_is_ignored(self):
+        """A corrupted key must not take the window down with it.
+
+        The value comes from a hand-editable JSON file, so a list where a dict
+        was expected is a real possibility rather than a hypothetical.
+        """
+        app = self._rebuild_with_prefs(
+            {'custom_theme_roles': ['#ff0000'], 'color_theme': 'TuneLab Dark'})
+        self.assertEqual(app._custom_roles, {})
+
+    def test_the_page_registry_matches_the_tab_attributes(self):
+        """``_page_frames`` is what the theme-follow probe iterates.
+
+        It has to name the same six pages ``show_frame`` can switch to, or the
+        probe quietly stops covering a page. The probe itself asserts it found at
+        least one scroll well, so it would stay green on a partial registry.
+        """
+        self.assertEqual(set(self.app._page_frames),
+                         {'downloader', 'queue', 'history', 'studio',
+                          'settings', 'performance'})
+        for name, frame in self.app._page_frames.items():
+            self.assertIsNotNone(frame, name)
+        # And each entry really is the frame the matching tab attribute holds,
+        # so the two cannot drift apart.
+        for name, attr in (('downloader', 'tab_downloader'),
+                            ('queue', 'tab_queue'),
+                            ('history', 'tab_history'),
+                            ('studio', 'tab_studio'),
+                            ('settings', 'tab_customization'),
+                            ('performance', 'tab_performance')):
+            self.assertIs(self.app._page_frames[name],
+                          getattr(self.app, attr), name)
+
+    def test_the_appearance_page_has_a_scroll_well(self):
+        """Its content is taller than the minimum window height.
+
+        Without the well the lower cards are simply unreachable at the default
+        size, and no test that only builds the window would notice.
+        """
+        import customtkinter as ctk
+        wells = [w for w in self.app._iter_widgets(self.app.tab_customization)
+                 if isinstance(w, ctk.CTkScrollableFrame)]
+        self.assertEqual(len(wells), 1)
+        self.assertEqual(wells[0], self.app.settings_scroll)
+
+    def test_custom_theme_is_offered_in_the_theme_menu(self):
+        self.assertIn(ui.CUSTOM_THEME_NAME, list(self.app.theme_menu.cget('values')))
+
+    def test_custom_theme_is_registered_in_the_palette_table(self):
+        """It lives in COLOR_THEMES so every lookup resolves it uniformly."""
+        self.assertIn(ui.CUSTOM_THEME_NAME, ui.COLOR_THEMES)
+
+    def test_start_from_seeds_and_applies(self):
+        self.app.start_custom_from('Dracula')
+        self.assertEqual(self.app._color_theme_name, ui.CUSTOM_THEME_NAME)
+        self.assertEqual(self.app._palette['accent'],
+                         ui.COLOR_THEMES['Dracula']['accent'])
+        self.assertEqual(self.app._palette['bg'], ui.COLOR_THEMES['Dracula']['bg'])
+
+    def test_set_role_repaints_and_persists(self):
+        self.app.start_custom_from('Dracula')
+        self.assertTrue(self.app.set_custom_role('accent', '#00FF00'))
+        self.assertEqual(self.app._palette['accent'], '#00ff00')
+        # The hover follows, so the accent button hovers green too.
+        self.assertEqual(self.app._palette['accent_hover'],
+                         ui._lift('#00ff00', 0.18, self.app._palette['mode']))
+        self.assertEqual(self.app._prefs['custom_theme_roles']['accent'], '#00ff00')
+
+    def test_set_role_rejects_a_bad_colour_and_an_unknown_role(self):
+        before = dict(self.app._palette)
+        self.assertFalse(self.app.set_custom_role('accent', 'not a colour'))
+        self.assertFalse(self.app.set_custom_role('nonexistent', '#00ff00'))
+        self.assertEqual(self.app._palette, before)
+
+    def test_swatch_keeps_its_own_colour_through_a_theme_switch(self):
+        """A swatch is a sample, so it must not be repainted as a role.
+
+        It carries an empty role map: if it joined the role walk it would take
+        the palette's value and stop showing the colour being edited.
+        """
+        self.app.start_custom_from('Dracula')
+        _label, swatch, _entry = self.app._custom_swatch_rows['accent']
+        self.assertEqual(ui._normalize_hex(swatch.cget('fg_color')),
+                         self.app._palette['accent'])
+        self.app.apply_color_theme('TuneLab Dark')
+        self.app.apply_color_theme(ui.CUSTOM_THEME_NAME)
+        self.assertEqual(ui._normalize_hex(swatch.cget('fg_color')),
+                         self.app._palette['accent'])
+
+    def test_hex_entry_reflects_the_palette(self):
+        self.app.start_custom_from('Nord')
+        _label, _swatch, entry = self.app._custom_swatch_rows['accent']
+        self.assertEqual(entry.get().strip().lower(),
+                         ui.COLOR_THEMES['Nord']['accent'].lower())
+
+    def test_invalid_hex_entry_is_reported_not_swallowed(self):
+        self.app.start_custom_from('Nord')
+        _label, _swatch, entry = self.app._custom_swatch_rows['accent']
+        before = self.app._palette['accent']
+        entry.delete(0, 'end')
+        entry.insert(0, 'not a colour')
+        toasts = []
+        self.app.show_toast = lambda *a, **k: toasts.append(a)
+        self.app._commit_custom_hex('accent')
+        self.assertEqual(self.app._palette['accent'], before)
+        self.assertTrue(toasts, 'an invalid value must say so')
+
+    def test_report_reads_pass_then_fail(self):
+        self.app.start_custom_from('Dracula')
+        self.app._refresh_custom_theme_ui()
+        passing = self.app._custom_report.cget('text')
+        self.assertIn('pass', passing.lower())
+        self.app.set_custom_role('text', '#101010')  # unreadable on its own bg
+        failing = self.app._custom_report.cget('text')
+        self.assertIn('below target', failing.lower())
+        self.assertNotEqual(failing, passing)
+
+    def test_mode_switch_rebases_the_fallback_palette(self):
+        """With nothing overridden, switching mode has to move the palette.
+
+        Roles the user has chosen are kept either way - their picks are the
+        point of the feature - so this only holds for an untouched palette.
+        """
+        self.app.reset_custom_palette('dark')
+        dark_bg = self.app._palette['bg']
+        self.app._on_custom_mode('light')
+        self.assertEqual(self.app._palette['mode'], 'light')
+        self.assertNotEqual(self.app._palette['bg'], dark_bg)
+        self.assertEqual(ui.contrast_failures(self.app._palette), [])
+        self.app._on_custom_mode('dark')
+        self.assertEqual(self.app._palette['mode'], 'dark')
+        self.assertEqual(self.app._palette['bg'], dark_bg)
+
+    def test_mode_switch_keeps_the_users_own_picks(self):
+        """A mode change rebases the fallbacks, not the colours already chosen.
+
+        Losing your picks on every base toggle would make the control feel like
+        it resets the work.
+        """
+        self.app.start_custom_from('Nord')
+        self.app.set_custom_role('accent', '#ff0055')
+        self.app._on_custom_mode('light')
+        self.assertEqual(self.app._palette['accent'], '#ff0055')
+        self.assertEqual(self.app._palette['mode'], 'light')
+
+    def test_reset_clears_every_override(self):
+        self.app.start_custom_from('Dracula')
+        self.app.set_custom_role('accent', '#00ff00')
+        self.app.reset_custom_palette('dark')
+        self.assertEqual(self.app._custom_roles, {})
+        self.assertEqual(self.app._palette['bg'],
+                         ui.COLOR_THEMES['TuneLab Dark']['bg'])
+
+    def test_custom_edits_do_not_leak_into_the_built_in_palettes(self):
+        dracula_before = dict(ui.COLOR_THEMES['Dracula'])
+        self.app.start_custom_from('Dracula')
+        self.app.set_custom_role('accent', '#00ff00')
+        self.assertEqual(ui.COLOR_THEMES['Dracula'], dracula_before)
+
+    def test_start_from_refuses_the_custom_entry_itself(self):
+        """Copying My Theme onto itself would freeze the current picks."""
+        self.app.start_custom_from('Nord')
+        self.app.set_custom_role('accent', '#00ff00')
+        self.app.start_custom_from(ui.CUSTOM_THEME_NAME)
+        self.assertEqual(self.app._palette['accent'], '#00ff00')
+
+    def test_a_custom_palette_reaches_the_scroll_wells(self):
+        """A hand-built palette must follow through the composite widgets.
+
+        The role walk covers ordinary widgets; scroll wells and dropdowns are
+        painted by a separate pass, so they are the likeliest place for a
+        custom palette to look half-applied.
+        """
+        self.app.start_custom_from('Midnight')
+        self.app.set_custom_role('surface', '#203040')
+        self.app.set_custom_role('bg', '#101820')
+        self.app.update_idletasks()
+        for page in ('tab_performance', 'tab_history', 'tab_queue'):
+            frame = getattr(self.app, page, None)
+            for widget in self.app._iter_widgets(frame):
+                if not isinstance(widget, ctk.CTkScrollableFrame):
+                    continue
+                got = widget._parent_canvas.cget('bg')
+                if isinstance(got, (tuple, list)):
+                    got = got[0]
+                self.assertNotEqual(
+                    ui._normalize_hex(got), ui.COLOR_THEMES['Midnight']['bg'],
+                    "%s well kept the palette it started with" % page)
 
 
 class FormControlThemeTests(unittest.TestCase):

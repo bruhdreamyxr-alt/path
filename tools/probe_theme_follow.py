@@ -39,10 +39,15 @@ def scroll_well(app):
     found as a CTkScrollableFrame in the page's subtree - asking each direct
     child for ``_parent_canvas`` finds nothing and the whole check passes
     vacuously.
+
+    The page list is read off the app's own ``_page_frames`` rather than written
+    here. It was a literal tuple, and a page that later gained a scroll well (the
+    Appearance page) was simply invisible to this check - the probe would have
+    reported green while the newest well went untested.
     """
     found = []
-    for page in ("tab_performance", "tab_history", "tab_queue"):
-        frame = getattr(app, page, None)
+    pages = getattr(app, "_page_frames", None) or {}
+    for page, frame in sorted(pages.items()):
         if frame is None:
             continue
         for widget in app._iter_widgets(frame):

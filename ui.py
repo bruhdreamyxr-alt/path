@@ -819,6 +819,141 @@ COLOR_THEMES = {
     },
 }
 
+# --- Custom (user-built) palette --------------------------------------------
+# The 21 palettes above are curated: each one's colours were picked together so
+# the hairlines stay one step apart and the semantic tones stay readable on their
+# own surfaces. A custom palette cannot promise that, so this feature is built
+# around two concessions to make hand-picking safe:
+#
+#   * the user chooses 12 colours, not 19 - every ``*_hover`` is *derived* from
+#     its base role by mixing it toward ``bg``, which is what the curated
+#     palettes do by hand and what keeps a hover from going lighter than its
+#     button on a dark theme (where hover reads as "recede");
+#   * every change is contrast-checked live against the same pairs the static
+#     audit uses, so a failing combination is reported where it is made rather
+#     than discovered later.
+CUSTOM_THEME_NAME = 'My Theme'
+
+# The roles a user picks. Order is the display order: structure first, then the
+# text that sits on it, then the semantics that colour status.
+CUSTOM_THEME_ROLES = (
+    'bg', 'surface', 'sidebar',
+    'text', 'sub', 'accent',
+    'success', 'warning', 'danger', 'purple',
+)
+
+# Roles that are never offered, because a hand-picked palette cannot get them
+# right and should not pretend to. ``sidebar_active`` is the selected-nav fill
+# and ``hover`` is the one-pixel step between a card and the window behind it;
+# both have to stay close to their own neighbours, which is a judgement the
+# derivation can make and a colour picker cannot. Deriving them is also what
+# keeps the card from growing two more rows the user would have to understand.
+CUSTOM_DERIVED_ROLES = {
+    # derived role -> (source role, how far to lift it)
+    # sidebar_active is capped low deliberately. It is the selected-nav pill, and
+    # it has to hold 'sub' at 4.5:1 while the pill is a *lighter* step than the
+    # sidebar it sits on. Every preset still passes at 0.06; 0.08 and above
+    # push 'sub' on sidebar_active under 4.5 on at least one seeded palette.
+    'sidebar_active': ('sidebar', 0.06),
+    'hover': ('surface', 0.14),
+}
+
+# base role -> the hover role derived from it.
+CUSTOM_THEME_HOVERS = {
+    'accent': 'accent_hover', 'success': 'success_hover',
+    'warning': 'warning_hover', 'danger': 'danger_hover',
+    'purple': 'purple_hover',
+}
+
+# The same bars tools/audit_contrast.py holds the curated palettes to. Mirrored
+# here (rather than imported) because that tool parses ui.py with ast and must
+# keep working without importing customtkinter.
+CUSTOM_CONTRAST_PAIRS = (
+    ('text', 'bg', 4.5), ('text', 'surface', 4.5), ('text', 'sidebar', 4.5),
+    ('text', 'sidebar_active', 4.5),
+    ('sub', 'bg', 4.5), ('sub', 'surface', 4.5), ('sub', 'sidebar', 4.5),
+    ('sub', 'sidebar_active', 4.5),
+    ('accent', 'surface', 3.0), ('accent', 'bg', 3.0), ('accent', 'sidebar', 3.0),
+    ('success', 'surface', 3.0), ('warning', 'surface', 3.0),
+    ('danger', 'surface', 3.0), ('purple', 'surface', 3.0),
+)
+
+# "Further from the window" is what a hover means, and which way that is depends
+# on the mode: a dark card lifts toward the light text, a light card drops
+# toward the dark text. The named colours are only the direction of travel - the
+# hue always comes from the source role, so an accent hover still looks like its
+# accent and a surface hover still looks like its surface.
+CUSTOM_LIFT_TARGET = {'dark': '#ffffff', 'light': '#000000'}
+
+
+def _lift(color: str, amount: float, mode: str) -> str:
+    """Move *color* one step away from the window, in the sense *mode* implies."""
+    return _mix(color, CUSTOM_LIFT_TARGET.get(mode, '#ffffff'), amount)
+
+_HEX_RE = re.compile(r'^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
+
+
+def _normalize_hex(value) -> Optional[str]:
+    """Return *value* as a lowercase ``#rrggbb``, or None if it is not a colour."""
+    text = str(value or '').strip()
+    if not _HEX_RE.match(text):
+        return None
+    if len(text) == 4:  # #abc -> #aabbcc
+        text = '#' + ''.join(ch * 2 for ch in text[1:])
+    return text.lower()
+
+
+def custom_palette(overrides: Optional[dict] = None,
+                   mode: str = 'dark') -> dict:
+    """Build a complete palette dict from a partial set of role overrides.
+
+    Missing roles fall back to TuneLab Dark (dark) or TuneLab Light's own
+    background family (light), so a half-configured custom theme is always
+    complete and renderable rather than missing keys the role walk would then
+    leave on whatever value it had before.
+    """
+    # A light base takes Serika Light wholesale rather than only its
+    # backgrounds: swapping the surfaces alone would leave the dark theme's
+    # blue accent and green success sitting on them, which is exactly the
+    # unreadable pairing the contrast report exists to warn about. Starting
+    # from the whole palette means the default custom light theme passes.
+    base = dict(COLOR_THEMES['TuneLab Dark']
+                if mode != 'light' else COLOR_THEMES['Serika Light'])
+    pal = dict(base)
+    # Stamped before the derivations below read it. The base's own 'mode' agrees
+    # today only because the base is chosen by the same flag; setting it here
+    # means _lift follows the mode the caller actually asked for.
+    pal['mode'] = 'light' if mode == 'light' else 'dark'
+    for role, value in (overrides or {}).items():
+        if role in CUSTOM_THEME_ROLES:
+            norm = _normalize_hex(value)
+            if norm:
+                pal[role] = norm
+    # Derive hovers from the (possibly just-edited) base roles, so a custom
+    # palette can never be left with a hover that belongs to a different colour.
+    # Lifted, not mixed toward bg: a card is usually *lighter* than the window in
+    # dark mode, so mixing toward bg made every hover recede into the background
+    # and the row looked like it was being erased rather than pressed.
+    for base_role, hover_role in CUSTOM_THEME_HOVERS.items():
+        pal[hover_role] = _lift(pal[base_role], 0.18, pal['mode'])
+    # ... and the two structural steps nobody is asked to pick.
+    for derived, (source, amount) in CUSTOM_DERIVED_ROLES.items():
+        pal[derived] = _lift(pal[source], amount, pal['mode'])
+    return pal
+
+
+def contrast_failures(pal: dict) -> list:
+    """(fg, bg, needed, got) for every pair in *pal* that misses its bar."""
+    bad = []
+    for fg, bkey, need in CUSTOM_CONTRAST_PAIRS:
+        if fg not in pal or bkey not in pal:
+            continue
+        got = _contrast(pal[fg], pal[bkey])
+        if got < need:
+            bad.append((fg, bkey, need, got))
+    return bad
+
+
 # Legacy hardcoded hexes -> palette role (used to recolor existing widgets).
 LEGACY_HEX_ROLES = {
     '#3498db': 'accent', '#2980b9': 'accent_hover', '#21618c': 'accent_hover',
@@ -1019,6 +1154,11 @@ class UniversalAudioStudio(ctk.CTk):
             # pointer crosses it steals attention from whatever you are doing.
             "sidebar_peek_on_hover": False,
             "color_theme": "TuneLab Dark",
+            # User-built palette. Roles only: the hovers are derived from them
+            # (see custom_palette), so saving them here would just be a second
+            # source of truth to fall out of step.
+            "custom_theme_roles": {},
+            "custom_theme_mode": "dark",
             "soundcloud_direct_first": True,
             "save_folder": "",
             "audio_format": "mp3_vbr",
@@ -1281,6 +1421,26 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Active color palette (Monkeytype-style theme engine)
         self._color_theme_name = self._prefs.get("color_theme", "TuneLab Dark")
+        # The custom palette lives in COLOR_THEMES like any other so that every
+        # lookup site (apply_color_theme, the role walk, the probes, the audit)
+        # resolves it without a special case. It is rebuilt from the saved roles
+        # at startup, which is also what re-derives its hovers.
+        raw_roles = self._prefs.get("custom_theme_roles") or {}
+        if not isinstance(raw_roles, dict):
+            raw_roles = {}
+        # Keep only the roles the picker offers. A prefs file written before a
+        # role became derived (or hand-edited) can still name it, and carrying
+        # that forward would let a dead key shadow the derivation: the value
+        # would be ignored on read but written back out on the next save, so the
+        # file would keep a colour the UI can no longer show or change.
+        self._custom_roles = {
+            role: value for role, value in raw_roles.items()
+            if role in CUSTOM_THEME_ROLES
+        }
+        self._custom_mode = "light" if self._prefs.get(
+            "custom_theme_mode") == "light" else "dark"
+        COLOR_THEMES[CUSTOM_THEME_NAME] = custom_palette(
+            self._custom_roles, self._custom_mode)
         if self._color_theme_name not in COLOR_THEMES:
             self._color_theme_name = "TuneLab Dark"
         self._palette = dict(COLOR_THEMES[self._color_theme_name])
@@ -1409,6 +1569,21 @@ class UniversalAudioStudio(ctk.CTk):
         self.tab_performance = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self.tab_queue = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self.tab_history = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+
+        # The single page registry, built once every page frame exists (history
+        # is created last, so this cannot sit with the others above). show_frame
+        # used to rebuild this dict inline on every click, which left any other
+        # tool wanting "all the pages" with no way to ask - the theme-follow probe
+        # hard-coded its own tuple and so silently skipped whichever page came
+        # next.
+        self._page_frames = {
+            'downloader': self.tab_downloader,
+            'queue': self.tab_queue,
+            'history': self.tab_history,
+            'studio': self.tab_studio,
+            'settings': self.tab_customization,
+            'performance': self.tab_performance,
+        }
 
         # Every page is a card: same surface, same corner radius and same
         # hairline edge as the dialogs. They are stacked in one hole and
@@ -3978,12 +4153,27 @@ class UniversalAudioStudio(ctk.CTk):
         # Light/Dark 'mode' and apply_color_theme syncs CTk from it, so the
         # separate "Theme Mode" dropdown was redundant and is gone.
 
-        theme_card = self._settings_card(self.tab_customization, "Theme")
-        theme_card.pack(fill="x", padx=UITheme.PAD_X, pady=(14, 8))
+        # The Appearance page outgrew the window: measured, its cards want ~1142px of
+        # height against a minsize of 680, so the last card was simply cut off
+        # unless the window was maximized. The Performance page solved the same
+        # problem with a scroll well; this one needs it too. Insets match that
+        # page's, for the same reason (a square canvas over rounded card
+        # corners): see the comment above the Performance scroll frame.
+        settings_scroll = ctk.CTkScrollableFrame(
+            self.tab_customization, fg_color="transparent")
+        settings_scroll.pack(fill="both", expand=True,
+                             padx=UITheme.RADIUS_CARD,
+                             pady=UITheme.RADIUS_CARD)
+        self.settings_scroll = settings_scroll
+
+        theme_card = self._settings_card(settings_scroll, "Theme")
+        theme_card.pack(fill="x", padx=0, pady=(0, 8))
         ctk.CTkLabel(
             theme_card, text="Color theme:",
             font=UITheme.F(12), anchor="w",
         ).pack(fill="x", padx=16, pady=(0, 4))
+        # CUSTOM_THEME_NAME is injected into COLOR_THEMES at startup, so it is
+        # in this list by the time the page is built.
         self.theme_menu = ctk.CTkOptionMenu(
             theme_card,
             values=list(COLOR_THEMES.keys()),
@@ -3998,6 +4188,8 @@ class UniversalAudioStudio(ctk.CTk):
             text="Light/Dark follows the palette you pick here.",
             font=UITheme.F(10), anchor="w", text_color="#95a5a6",
         ).pack(fill="x", padx=16, pady=(0, 12))
+
+        self._build_custom_theme_card()
 
         # Theme selection lives in the dropdown above only (the duplicate row
         # of clickable swatch dots was removed as redundant UI).
@@ -4014,9 +4206,8 @@ class UniversalAudioStudio(ctk.CTk):
 
         # Rail behaviour. The collapse state, hover-peek and motion lengths
         # are appearance choices, so they sit here rather than in Performance.
-        rail_card = self._settings_card(self.tab_customization,
-                                        "Sidebar & motion")
-        rail_card.pack(fill="x", padx=UITheme.PAD_X, pady=(0, 8))
+        rail_card = self._settings_card(settings_scroll, "Sidebar & motion")
+        rail_card.pack(fill="x", padx=0, pady=(0, 8))
 
         self.sb_collapsed_var = tk.BooleanVar(value=not self._sidebar_expanded)
         self.sb_collapsed_chk = ctk.CTkCheckBox(
@@ -4259,14 +4450,7 @@ class UniversalAudioStudio(ctk.CTk):
         # the residual black-flash on click-through.
         if name == getattr(self, '_current_page', None):
             return
-        pages = {
-            'downloader': self.tab_downloader,
-            'queue': self.tab_queue,
-            'history': self.tab_history,
-            'studio': self.tab_studio,
-            'settings': self.tab_customization,
-            'performance': self.tab_performance,
-        }
+        pages = self._page_frames
         page_titles = {
             'downloader': 'Media Downloader',
             'queue': 'Download Queue',
@@ -5711,6 +5895,224 @@ class UniversalAudioStudio(ctk.CTk):
             pass
         return menu
 
+    # The 12 roles the user picks, grouped as they are displayed. Every entry is
+    # editable: CUSTOM_THEME_ROLES is the authority for what a custom palette
+    # accepts, and a role missing from this table simply keeps the preset value
+    # it was seeded from rather than breaking anything.
+    _CUSTOM_ROLE_GROUPS = (
+        ("Background", ('bg', 'surface', 'sidebar')),
+        ("Text", ('text', 'sub', 'accent')),
+        ("Status", ('success', 'warning', 'danger', 'purple')),
+    )
+
+    # Palettes offered in the "Start from" menu. Every curated palette is
+    # listed, minus the custom entry itself.
+    _CUSTOM_START_THEMES = (
+        "TuneLab Dark", "Serika Dark", "Midnight", "Moon", "Nord",
+        "Gruvbox Dark", "Dracula", "Tokyo Night", "Catppuccin Mocha",
+        "Metropolis", "Velvet Purple", "Pure Purple", "Laserbeam", "Crimson",
+        "Horizon", "Botanical", "Monokai", "Serika Light", "Solarized Light",
+        "Gruvbox Light", "Soft Lilac Light",
+    )
+
+    def _build_custom_theme_card(self):
+        """The 'Custom colors' card: pick each role, watch contrast as you go."""
+        card = self._settings_card(self.settings_scroll, "Custom colors")
+        card.pack(fill="x", padx=0, pady=(0, 8))
+        pal = getattr(self, "_palette", {}) or {}
+
+        intro = ctk.CTkLabel(
+            card,
+            # One sentence, no paragraph: this card sits under the theme dropdown
+            # and says what it does and what it will not ask about. The long
+            # version explained the derivation, which the copy no longer needs
+            # to carry - the derived shades simply stay in step by themselves.
+            text="Start from a preset, then adjust. Hover shades follow your "
+                 "colours automatically.",
+            font=UITheme.F(11), anchor="w", wraplength=660, justify="left",
+            text_color=pal.get("sub", "#95a5a6"),
+        )
+        intro.pack(fill="x", padx=16, pady=(0, 10))
+        setattr(intro, "_theme_roles", {"text_color": "sub"})
+
+        # Start-from row. Seeding beats starting from blank: a user who picks a
+        # One control, not two. This used to be a dropdown plus a separate
+        # "Use this palette" button, which asked for a confirmation that had
+        # nothing to confirm: picking a preset to start from is not a proposal.
+        # Selecting one now seeds it directly, like every other dropdown here.
+        start_row = ctk.CTkFrame(card, fg_color="transparent")
+        start_row.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(start_row, text="Copy from:", font=UITheme.F(11),
+                     anchor="w").pack(side="left")
+        self._custom_start_menu = ctk.CTkOptionMenu(
+            start_row, values=list(self._CUSTOM_START_THEMES),
+            command=self._on_custom_start, width=190,
+        )
+        self._custom_start_menu.set("TuneLab Dark")
+        self._custom_start_menu.pack(side="left", padx=(8, 0))
+        self._style_option_menu(self._custom_start_menu)
+
+        # One swatch row per editable role. The swatch is a button rather than a
+        # label so the whole row is a pointer target; the hex entry beside it
+        # makes every role reachable without a mouse at all.
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=16, pady=(0, 6))
+        self._custom_swatch_rows = {}
+        row_index = 0
+        for title, roles in self._CUSTOM_ROLE_GROUPS:
+            head = ctk.CTkLabel(grid, text=title, font=UITheme.F(11, "bold"),
+                                anchor="w")
+            head.grid(row=row_index, column=0, columnspan=3, sticky="w",
+                      pady=(6, 2))
+            setattr(head, "_theme_roles", {"text_color": "text"})
+            row_index += 1
+            for role in roles:
+                label = ctk.CTkLabel(grid, text=role, font=UITheme.F(11),
+                                     anchor="w", width=110)
+                label.grid(row=row_index, column=0, sticky="w")
+                setattr(label, "_theme_roles", {"text_color": "sub"})
+                swatch = ctk.CTkButton(
+                    grid, text="", width=54, height=UITheme.H_XS,
+                    command=lambda r=role: self._pick_custom_role(r),
+                )
+                swatch.grid(row=row_index, column=1, padx=(0, 6))
+                value = ctk.CTkEntry(grid, width=92)
+                value.grid(row=row_index, column=2, sticky="w")
+                value.bind("<Return>", lambda e, r=role: self._commit_custom_hex(r))
+                value.bind("<FocusOut>",
+                           lambda e, r=role: self._commit_custom_hex(r))
+                self._custom_swatch_rows[role] = (label, swatch, value)
+                row_index += 1
+        grid.grid_columnconfigure(2, weight=1)
+
+        # The report gets its own row. Sharing a row with the Dark/Light menu and Reset
+        # let the report's wrapped text grow into them and clip both off the right
+        # edge, and the page now scrolls anyway, so the extra line costs nothing.
+        self._custom_report = ctk.CTkLabel(
+            card, text="", font=UITheme.F(10), anchor="w", wraplength=700,
+            justify="left",
+        )
+        self._custom_report.pack(fill="x", padx=16, pady=(0, 10))
+        setattr(self._custom_report, "_theme_roles", {"text_color": "sub"})
+
+        # Displayed capitalised, stored lowercase: the mode key is compared
+        # against 'light' in custom_palette and is written to prefs as-is.
+        self._custom_mode_var = tk.StringVar(
+            value=self._custom_mode.capitalize())
+        mode_row = ctk.CTkFrame(card, fg_color="transparent")
+        mode_row.pack(fill="x", padx=16, pady=(0, 12))
+
+        mode_menu = ctk.CTkOptionMenu(
+            mode_row, values=["Dark", "Light"],
+            variable=self._custom_mode_var, command=self._on_custom_mode,
+            width=104,
+        )
+        mode_menu.pack(side="left")
+        self._custom_mode_menu = mode_menu
+        self._style_option_menu(mode_menu)
+        reset_btn = ctk.CTkButton(
+            mode_row, text="Reset", width=88, height=UITheme.H_XS,
+            font=UITheme.F(11),
+            command=lambda: self.reset_custom_palette(
+                self._custom_mode_menu.get().lower()),
+        )
+        # Named *_btn rather than `reset`: tests/test_download_queue.py scans
+        # ui.py for `x = self._queue_manager` aliases and then any `x.<attr>`
+        # in the file, so a local named `reset` here would make the queue-alias
+        # sweep read this button's .pack as queue API.
+        reset_btn.pack(side="left", padx=(8, 0))
+        self._style_button(reset_btn, "ghost")
+
+        self._refresh_custom_theme_ui()
+
+    def _pick_custom_role(self, role: str):
+        """Open the OS colour chooser for *role*, then apply the result."""
+        from tkinter import colorchooser
+        current = custom_palette(self._custom_roles,
+                                 self._custom_mode).get(role, "#000000")
+        chosen = colorchooser.askcolor(color=current, parent=self,
+                                      title="Pick %s" % role)
+        if chosen and chosen[1]:
+            self.set_custom_role(role, chosen[1])
+
+    def _on_custom_start(self, theme_name: str) -> None:
+        self.start_custom_from(theme_name)
+
+    def _commit_custom_hex(self, role: str):
+        """Apply whatever is in a role's hex entry, or restore it if invalid."""
+        row = (getattr(self, "_custom_swatch_rows", None) or {}).get(role)
+        if not row:
+            return
+        entry = row[2]
+        typed = entry.get().strip()
+        if not typed:
+            self._refresh_custom_theme_ui()
+            return
+        if not self.set_custom_role(role, typed):
+            # Refuse the value but say so: silently reverting looks like the
+            # keyboard ate the entry.
+            self.show_toast(
+                "“%s” is not a colour. Use #rgb or #rrggbb." % typed, "warning")
+
+    def _on_custom_mode(self, mode: str) -> None:
+        # Accepts the displayed capitalisation as well as the stored form, so a
+        # call from a test or the reset button does not have to know which.
+        mode = str(mode or "").strip().lower()
+        if mode in ("light", "dark"):
+            self._custom_mode = mode
+            self._apply_custom_palette()
+
+    def _refresh_custom_theme_ui(self) -> None:
+        """Sync swatches, hex entries and the contrast report to the palette."""
+        rows = getattr(self, "_custom_swatch_rows", None)
+        if not rows:
+            return
+        pal = custom_palette(self._custom_roles, self._custom_mode)
+        for role, (label, swatch, entry) in rows.items():
+            value = pal.get(role, "#000000")
+            try:
+                swatch.configure(fg_color=value, hover_color=value,
+                                 text_color=_on_color(value, "#ffffff",
+                                                      "#000000"))
+                # The swatch shows the role's own colour, which is the entire
+                # point of it, so it must NOT join the role walk and be
+                # repainted with something else.
+                setattr(swatch, "_theme_roles", {})
+            except Exception:
+                logger.debug("Swatch refresh failed for %r", role, exc_info=True)
+            setattr(label, "_theme_roles", {"text_color": "sub"})
+            try:
+                if entry.get().strip().lower() != value:
+                    entry.delete(0, "end")
+                    entry.insert(0, value)
+            except Exception:
+                pass
+        try:
+            self._custom_mode_var.set(self._custom_mode.capitalize())
+        except Exception:
+            pass
+
+        # The report: name the failures, with the ratio, so a user can act.
+        bad = contrast_failures(pal)
+        if bad:
+            worst = sorted(bad, key=lambda r: r[3])[:3]
+            detail = "; ".join(
+                "%s on %s %.1f:1 (needs %g)" % (fg, bg, got, need)
+                for fg, bg, need, got in worst)
+            text = "%d contrast check(s) below target — %s" % (len(bad), detail)
+            color = UITheme.COLOR_DANGER
+        else:
+            text = ("All contrast checks pass. "
+                    "Small text needs 4.5:1, accents and status colours 3:1.")
+            color = UITheme.COLOR_SUCCESS
+        try:
+            self._custom_report.configure(text=text, text_color=color)
+            # Tagged as a fixed value on purpose: a failure has to stay red
+            # while the palette it refers to is changing underneath it.
+            setattr(self._custom_report, "_theme_roles", {})
+        except Exception:
+            pass
+
     def _settings_card(self, parent, title):
         """Bordered card with a section header.
 
@@ -5866,6 +6268,58 @@ class UniversalAudioStudio(ctk.CTk):
             except Exception:
                 logger.debug("Styling a composite widget failed", exc_info=True)
         return done
+
+    # --- Custom palette editing ------------------------------------------------
+    # Editing writes straight into COLOR_THEMES[CUSTOM_THEME_NAME] and re-runs
+    # the normal apply path, so a hand-built palette is repainted by exactly the
+    # same code a curated one is. Nothing here touches a widget's colour option
+    # directly, which is what keeps the role walk authoritative.
+
+    def _apply_custom_palette(self, persist: bool = True):
+        """Rebuild, save and activate the custom palette."""
+        pal = custom_palette(self._custom_roles, self._custom_mode)
+        COLOR_THEMES[CUSTOM_THEME_NAME] = pal
+        if persist:
+            self._set_pref("custom_theme_roles", dict(self._custom_roles))
+            self._set_pref("custom_theme_mode", self._custom_mode)
+        self.apply_color_theme(CUSTOM_THEME_NAME)
+        self._refresh_custom_theme_ui()
+        return pal
+
+    def set_custom_role(self, role: str, value) -> bool:
+        """Set one role of the custom palette. False if *value* is not a colour."""
+        if role not in CUSTOM_THEME_ROLES:
+            return False
+        norm = _normalize_hex(value)
+        if norm is None:
+            return False
+        self._custom_roles = dict(self._custom_roles)
+        self._custom_roles[role] = norm
+        self._apply_custom_palette()
+        return True
+
+    def reset_custom_palette(self, mode: Optional[str] = None) -> None:
+        """Drop every custom role and fall back to the built-in starting point."""
+        self._custom_roles = {}
+        if mode in ("light", "dark"):
+            self._custom_mode = mode
+        self._apply_custom_palette()
+
+    def start_custom_from(self, theme_name: str) -> None:
+        """Seed the custom roles from a curated palette, so editing starts sane.
+
+        Copying the 12 roles a user can edit is enough: the hovers come out of
+        the derivation, and they land close to the source palette's own because
+        that palette moves each one toward its bg by a similar step.
+        """
+        src = COLOR_THEMES.get(theme_name)
+        if not src or theme_name == CUSTOM_THEME_NAME:
+            return
+        self._custom_roles = {
+            role: src[role] for role in CUSTOM_THEME_ROLES if role in src
+        }
+        self._custom_mode = src.get("mode") or "dark"
+        self._apply_custom_palette()
 
     def apply_color_theme(self, name):
         """Apply a named color theme to the entire UI and remember it."""
