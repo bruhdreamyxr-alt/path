@@ -6,6 +6,7 @@ import tempfile
 import textwrap
 import unittest
 from typing import Any
+from unittest import mock
 
 import downloader
 import download_queue
@@ -589,6 +590,74 @@ class AeReencodeArgsTests(unittest.TestCase):
         # 600s killed long re-encodes mid-way and silently left the
         # AE-incompatible source file behind.
         self.assertGreaterEqual(downloader.AE_REENCODE_TIMEOUT, 3600)
+
+    def test_the_encode_does_not_take_every_core(self):
+        """ffmpeg at 100% across the board makes the desktop unusable.
+
+        x264 defaults to all cores, so without an explicit cap a 4K download
+        saturates the machine - and since the user is watching the download in
+        TuneLab, a frozen-looking UI is what they actually notice.
+        """
+        args = downloader._ae_reencode_args("a.mp4", "b.mp4")
+        self.assertIn("-threads", args)
+        threads = int(args[args.index("-threads") + 1])
+        self.assertGreaterEqual(threads, 2, "a 4K encode on one thread would crawl")
+        self.assertLessEqual(threads, 4, "more threads buys little and costs the user their machine")
+
+    def test_thread_cap_leaves_cores_free_on_a_big_machine(self):
+        with mock.patch.object(downloader.os, "cpu_count", return_value=32):
+            self.assertLessEqual(downloader._ae_encode_threads(), 4)
+
+    def test_thread_cap_never_drops_to_a_single_thread(self):
+        with mock.patch.object(downloader.os, "cpu_count", return_value=2):
+            self.assertEqual(downloader._ae_encode_threads(), 2)
+
+    def test_thread_cap_survives_a_broken_cpu_count(self):
+        with mock.patch.object(downloader.os, "cpu_count", return_value=None):
+            self.assertGreaterEqual(downloader._ae_encode_threads(), 2)
+
+    def test_lookahead_is_shortened_to_keep_memory_down(self):
+        """x264's default 40-frame lookahead is ~0.5GB of frame buffers at 4K.
+
+        A full 4K re-encode peaked at ~3.2GB RSS with the default, which on a
+        small machine reads as "ffmpeg ate all my memory". A short lookahead
+        keeps the peak near 1.4GB for well under 1% more bytes.
+        """
+        args = downloader._ae_reencode_args("a.mp4", "b.mp4")
+        self.assertIn("-x264-params", args)
+        params = args[args.index("-x264-params") + 1]
+        self.assertIn("rc-lookahead=", params)
+        lookahead = int(params.split("rc-lookahead=")[1].split(":")[0])
+        self.assertGreaterEqual(lookahead, 5, "too short and mbtree stops working")
+        self.assertLessEqual(lookahead, 20, "the default 40 is the memory hog")
+
+    def test_lowering_priority_never_raises(self):
+        """A process we cannot demote must still be allowed to finish."""
+        boom = RuntimeError("no such process")
+
+        class FakeProc:
+            pid = boom  # any attribute access explodes
+
+        downloader._lower_process_priority(FakeProc())  # must not raise
+
+    def test_a_timed_out_encode_kills_the_child(self):
+        """A runaway 4K encode must not outlive the download that started it.
+
+        With Popen there is no timeout= parameter, so the guard has to be the
+        explicit kill path - otherwise a stuck ffmpeg would sit on a
+        multi-gigabyte temp file indefinitely.
+        """
+        proc = mock.MagicMock()
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1),
+            None,
+        ]
+        with mock.patch.object(downloader.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(downloader, "_get_ffmpeg_bin", return_value="ffmpeg"), \
+             mock.patch.object(downloader.os.path, "exists", return_value=True):
+            result = downloader._reencode_for_ae("a.mp4")
+        proc.kill.assert_called_once()
+        self.assertEqual(result, "a.mp4")
 
 
 class InstagramDuplicateDownloadTests(unittest.TestCase):

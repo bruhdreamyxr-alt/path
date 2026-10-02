@@ -33,6 +33,20 @@ _probe_build.log
 probe_out.txt
 
 # ---------------------------------------------------------------
+# Verification-harness byproducts (_cpu_check.py / _e2e_download_check.py).
+# The harness scripts themselves are tracked on purpose - they are the only way
+# to exercise a real network download and the AE re-encode path - but the log
+# files and scratch clips they produce are not.
+# ---------------------------------------------------------------
+_cpu_out.txt
+_cpu_err.txt
+_cpu_pid.txt
+_e2e_out.txt
+_e2e_err.txt
+_ae_cpu_check_4k.mp4
+_short4k.mp4
+
+# ---------------------------------------------------------------
 # Local environments and caches
 # ---------------------------------------------------------------
 .venv/
