@@ -45,11 +45,29 @@ if TYPE_CHECKING:
     import vlc  # type: ignore
 
 
-try:
-    from PIL import Image, ImageDraw
-except Exception:
-    Image = None
-    ImageDraw = None
+_pil_image = None
+_pil_image_draw = None
+
+
+def _lazy_import_pil():
+    """Import Pillow's Image/ImageDraw on first use, caching both.
+
+    Pillow is only needed to rasterize the button and rail icons, which happens
+    once at startup - but importing it unconditionally cost ~100ms on every
+    launch, including the ones where the app is only being closed again. This
+    matches the sounddevice/numpy/vlc pattern already used below.
+    """
+    global _pil_image, _pil_image_draw
+    if _pil_image is None and _pil_image_draw is None:
+        try:
+            from PIL import Image as _img
+            from PIL import ImageDraw as _draw
+            _pil_image = _img
+            _pil_image_draw = _draw
+        except Exception:
+            logger.debug("Pillow is unavailable; icons fall back to text",
+                         exc_info=True)
+    return _pil_image, _pil_image_draw
 
 # Heavy imports deferred until actually needed
 sd = None
@@ -364,7 +382,8 @@ def _render_icon_image(name, color, px):
     fall back to a text-only label instead of losing the control.
     """
     shapes = _icon_shapes(name)
-    if not shapes or Image is None or ImageDraw is None or px <= 0:
+    _Image, _ImageDraw = _lazy_import_pil()
+    if not shapes or _Image is None or _ImageDraw is None or px <= 0:
         return None
     side = int(px) * _ICON_SS
     k = side / float(_ICON_GRID)
@@ -376,8 +395,8 @@ def _render_icon_image(name, color, px):
         return None
     ink = (r, g, b, 255)
     try:
-        img = Image.new("RGBA", (side, side), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
+        img = _Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        draw = _ImageDraw.Draw(img)
 
         def pt(x, y):
             return (x * k, y * k)
@@ -419,7 +438,7 @@ def _render_icon_image(name, color, px):
                 # either - both keep going clockwise.
                 draw.arc(box(rest[0], rest[1], rest[2]), rest[3],
                          rest[3] + rest[4], fill=ink, width=stroke)
-        return img.resize((int(px), int(px)), Image.Resampling.LANCZOS)
+        return img.resize((int(px), int(px)), _Image.Resampling.LANCZOS)
     except Exception:
         logger.debug("Rendering icon %r failed", name, exc_info=True)
         return None
@@ -6408,6 +6427,18 @@ class UniversalAudioStudio(ctk.CTk):
                     roles[opt] = role
                 new_val = pal.get(role)
                 if not new_val:
+                    continue
+                # Skip the configure when the widget already holds this exact
+                # colour. CTk re-runs its whole draw pipeline on every
+                # configure() - canvas item create/delete plus a font
+                # re-measure - and the walk below issues one per themed option
+                # per widget. On startup, where the widgets were just built from
+                # this very palette, 221 of the 223 configures that pass through
+                # here changed nothing, so they were 221 full redraws plus the
+                # 542-widget cget() sweep to discover that. Comparing first
+                # keeps theme *switches* correct (those genuinely differ) while
+                # making the startup pass nearly free.
+                if str(new_val).lower() == cur.lower():
                     continue
                 try:
                     w.configure(**{opt: new_val})

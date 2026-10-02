@@ -1,11 +1,97 @@
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from typing import Any
 
 import downloader
 import download_queue
+
+
+class LazyOptionalDependencyTests(unittest.TestCase):
+    """The heavy optional deps must not be imported just by importing the app.
+
+    These five modules together cost over a second of import time and are only
+    needed once the user actually downloads, tags, previews or processes a file.
+    Importing them at module scope made every launch pay for a session that
+    might never touch any of them.
+    """
+
+    HEAVY = ("yt_dlp", "mutagen", "pedalboard", "soundfile", "numpy")
+
+    def _import_fresh(self, module_name: str) -> dict:
+        """Import *module_name* in a clean interpreter, return sys.modules."""
+        code = textwrap.dedent(f"""
+            import sys
+            import {module_name}
+            print(repr(sorted(
+                m for m in sys.modules
+                if m.split('.')[0] in {self.HEAVY!r}
+            )))
+        """)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.dirname(os.path.abspath(downloader.__file__))
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=180, env=env,
+            cwd=os.path.dirname(os.path.abspath(downloader.__file__)),
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return eval(out.stdout.strip())
+
+    def test_importing_downloader_pulls_in_no_heavy_dependency(self):
+        loaded = self._import_fresh("downloader")
+        self.assertEqual(
+            [m for m in loaded if m in self.HEAVY], [],
+            "downloader must not import these at module scope: %r" % (loaded,),
+        )
+
+    def test_importing_the_ui_pulls_in_no_heavy_dependency(self):
+        loaded = self._import_fresh("ui")
+        self.assertEqual(
+            [m for m in loaded if m in self.HEAVY], [],
+            "ui must not import these at module scope: %r" % (loaded,),
+        )
+
+    def test_the_module_level_names_still_resolve_lazily(self):
+        """PEP 562 __getattr__ keeps the old public surface working.
+
+        ``downloader.yt_dlp`` used to be a plain global. Code outside this file
+        (and the tests) reads it, so it has to keep meaning "the module, or
+        None" - just resolved on demand instead of at import time.
+        """
+        self.assertIsNotNone(downloader.yt_dlp)
+        self.assertTrue(hasattr(downloader.yt_dlp, "YoutubeDL"))
+        self.assertIsNotNone(downloader.mutagen)
+        self.assertIsNotNone(downloader.Image)
+
+    def test_an_unknown_attribute_still_raises_attributeerror(self):
+        with self.assertRaises(AttributeError):
+            downloader.definitely_not_a_real_attribute
+
+    def test_the_dsp_trio_is_all_or_nothing(self):
+        """process_studio_dsp checks all three before using any of them.
+
+        Returning a partial trio would turn the "install pedalboard" message
+        into an AttributeError somewhere deeper in the DSP path.
+        """
+        audio_file, pedalboard_cls, reverb = downloader._dsp_backends()
+        self.assertEqual(
+            [audio_file is None, pedalboard_cls is None, reverb is None].count(True),
+            0 if audio_file is not None else 3,
+        )
+
+    def test_the_cache_returns_the_same_object_every_time(self):
+        self.assertIs(downloader._mod_yt_dlp(), downloader._mod_yt_dlp())
+        self.assertIs(downloader._dsp_backends(), downloader._dsp_backends())
+
+    def test_a_missing_dependency_degrades_to_none(self):
+        """An unimportable module must resolve to None, not blow up."""
+        downloader._optional_modules["not_a_real_module_xyz"] = None
+        self.assertIsNone(downloader._optional_import("not_a_real_module_xyz"))
 
 
 class VideoFormatStringTests(unittest.TestCase):

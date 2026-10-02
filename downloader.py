@@ -96,26 +96,6 @@ def begin_download_session() -> None:
     # search result's artist/title/artwork and tag the new file wrongly.
     _last_dl_metadata.clear()
 
-try:
-    import soundfile as sf
-except Exception:
-    sf = None
-
-try:
-    import mutagen
-except Exception:
-    mutagen = None
-
-try:
-    import yt_dlp
-except Exception:
-    yt_dlp = None
-
-try:
-    from PIL import Image
-except Exception:
-    Image = None
-
 import io
 import tempfile
 import glob
@@ -124,23 +104,97 @@ import json
 import urllib.request
 import urllib.parse
 import subprocess
+import importlib
 
-try:
-    from pedalboard import Reverb
-    from pedalboard.io import AudioFile
-except Exception:
-    Reverb = None
-    AudioFile = None
+# ---------------------------------------------------------------------------
+# Optional heavy dependencies (lazy)
+# ---------------------------------------------------------------------------
+# mutagen, yt_dlp, Pillow, soundfile and pedalboard together cost well over a
+# second of import time, and every one of them is only needed once the user
+# actually downloads, tags, previews or processes a file. Importing them here
+# meant every launch paid that cost - including the ones that never download
+# anything. They are resolved on first use instead, and the results are cached
+# so the second call is a dict lookup.
+#
+# PEP 562 __getattr__ below keeps ``downloader.yt_dlp`` and friends working as
+# module attributes for the tests and any external tooling, so nothing outside
+# this file has to know the difference.
+_optional_modules: dict = {}
 
-# Pylance sometimes cannot resolve Pedalboard export from pedalboard.
-# Fallback import keeps runtime behavior unchanged while improving type-checking.
-try:
-    from pedalboard import Pedalboard  # type: ignore
-except Exception:  # pragma: no cover
+
+def _optional_import(name: str):
+    """Import *name* once, caching the module (or ``None`` if unavailable)."""
+    if name in _optional_modules:
+        return _optional_modules[name]
     try:
-        from pedalboard._pedalboard import Pedalboard  # type: ignore
+        module = importlib.import_module(name)
     except Exception:
-        Pedalboard = None
+        logger.debug("Optional dependency %s is unavailable", name, exc_info=True)
+        module = None
+    _optional_modules[name] = module
+    return module
+
+
+def _mod_yt_dlp():
+    """The ``yt_dlp`` module, or ``None`` when it is not installed."""
+    return _optional_import('yt_dlp')
+
+
+def _mod_mutagen():
+    """The ``mutagen`` module, or ``None`` when it is not installed."""
+    return _optional_import('mutagen')
+
+
+def _mod_image():
+    """Pillow's ``Image`` module, or ``None`` when it is not installed."""
+    pil = _optional_import('PIL.Image')
+    return pil
+
+
+def _mod_soundfile():
+    """The ``soundfile`` module, or ``None`` when it is not installed."""
+    return _optional_import('soundfile')
+
+
+def _dsp_backends():
+    """Resolve pedalboard's ``(AudioFile, Pedalboard, Reverb)`` trio.
+
+    Returns a 3-tuple of either the real classes or ``None``, matching what the
+    eager import used to leave in the module globals. The Slowed + Reverb DSP
+    path checks all three before using any of them, so it degrades to a clear
+    "install pedalboard" message rather than an AttributeError.
+    """
+    if 'pedalboard_dsp' in _optional_modules:
+        return _optional_modules['pedalboard_dsp']
+    try:
+        board_mod = importlib.import_module('pedalboard')
+        io_mod = importlib.import_module('pedalboard.io')
+        resolved = (io_mod.AudioFile, board_mod.Pedalboard, board_mod.Reverb)
+    except Exception:
+        logger.debug("pedalboard is unavailable", exc_info=True)
+        resolved = (None, None, None)
+    _optional_modules['pedalboard_dsp'] = resolved
+    return resolved
+
+
+def __getattr__(name: str):
+    """Resolve the historically module-level optional deps on first access.
+
+    These were plain globals before; keeping them working as attributes means
+    ``downloader.yt_dlp`` still means "the module, or None" for callers outside
+    this file, without the import cost moving back to startup.
+    """
+    if name == 'sf':
+        return _mod_soundfile()
+    if name == 'mutagen':
+        return _mod_mutagen()
+    if name == 'yt_dlp':
+        return _mod_yt_dlp()
+    if name == 'Image':
+        return _mod_image()
+    if name in ('Reverb', 'AudioFile', 'Pedalboard'):
+        return _dsp_backends()[{'Reverb': 2, 'AudioFile': 0, 'Pedalboard': 1}[name]]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Global performance configuration (modifiable from UI)
 ARIA2_MAX_CONNECTIONS = 16  # aria2's hard limit for --max-connection-per-server (-x)
@@ -612,7 +666,7 @@ def _apply_platform_headers(ydl_opts: dict, url: str) -> dict:
                 ]
         except Exception:
             pass
-        if yt_dlp is not None:
+        if _mod_yt_dlp() is not None:
             try:
                 from yt_dlp.networking.impersonate import ImpersonateTarget
                 ydl_opts['impersonate'] = ImpersonateTarget('chrome', '120', 'macos', '14')
@@ -671,7 +725,7 @@ def update_ytdlp(status_callback: Optional[Callable[[str, str], Any]] = None) ->
     _say("Checking for yt-dlp updates...", "#3498db")
     before = get_ytdlp_version()
 
-    if not getattr(sys, "frozen", False) and yt_dlp is not None:
+    if not getattr(sys, "frozen", False) and _mod_yt_dlp() is not None:
         # Development/source environment: upgrade the installed Python module.
         _say("Updating yt-dlp...", "#3498db")
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", "yt-dlp"]
@@ -949,7 +1003,7 @@ def can_resolve_preview() -> bool:
     Returns True when either the Python ``yt_dlp`` module is importable or a
     bundled ``yt-dlp.exe`` (in the base dir or on PATH) is available.
     """
-    if yt_dlp is not None:
+    if _mod_yt_dlp() is not None:
         return True
     return _get_ytdlp_exe() is not None
 
@@ -961,7 +1015,8 @@ def resolve_preview_stream(url: str, audio_only: bool = False) -> str:
     to the bundled ``yt-dlp.exe`` (``-g``) when the module is missing. Raises a
     ``RuntimeError`` with an actionable message if neither is available.
     """
-    if yt_dlp is not None:
+    _ytdlp_mod = _mod_yt_dlp()
+    if _ytdlp_mod is not None:
         fmt = 'bestaudio/best' if audio_only else 'best'
         ydl_opts: dict[str, Any] = {
             'format': fmt,
@@ -972,7 +1027,7 @@ def resolve_preview_stream(url: str, audio_only: bool = False) -> str:
             'force_ipv4': True,
         }
         ydl_opts = _apply_platform_headers(ydl_opts, url)
-        with cast(Any, yt_dlp).YoutubeDL(cast(Any, ydl_opts)) as ydl:
+        with cast(Any, _ytdlp_mod).YoutubeDL(cast(Any, ydl_opts)) as ydl:
             info = ydl.extract_info(url, download=False)
         stream_url: Optional[str] = None
         if isinstance(info, dict):
@@ -1032,12 +1087,13 @@ def resolve_preview_stream(url: str, audio_only: bool = False) -> str:
 
 
 def _build_youtube_dl(options: dict[str, Any]) -> Any:
-    if yt_dlp is None:
+    _ytdlp_mod = _mod_yt_dlp()
+    if _ytdlp_mod is None:
         raise RuntimeError(
             "Missing dependency: 'yt-dlp' Python module is required for this codepath. "
             "If you have yt-dlp.exe, downloader() functions should fall back to it."
         )
-    return yt_dlp.YoutubeDL(cast(Any, options))
+    return _ytdlp_mod.YoutubeDL(cast(Any, options))
 
 
 def build_fast_yt_dlp_options(base_dir, output_template, audio_only: bool = False, perf_cfg: Optional[dict] = None, format_override: Optional[str] = None, player_client: Optional[list] = None) -> dict[str, Any]:
@@ -1387,7 +1443,7 @@ def pick_produced_media_file(folder: str, before_files: Optional[set] = None) ->
 
 
 def _mp3_has_embedded_artwork(mp3_path: str) -> bool:
-    if mutagen is None:
+    if _mod_mutagen() is None:
         return False
     try:
         from mutagen.mp3 import MP3
@@ -1450,9 +1506,10 @@ def _normalize_image_bytes(raw: bytes):
         fmt = 'BMP'
 
     # Convert every non-JPEG format to JPEG for maximum player compatibility.
-    if Image is not None and fmt != 'JPEG':
+    _pil_image = _mod_image()
+    if _pil_image is not None and fmt != 'JPEG':
         try:
-            im = Image.open(io.BytesIO(raw))
+            im = _pil_image.open(io.BytesIO(raw))
             im = im.convert('RGB')
             out = io.BytesIO()
             im.save(out, format='JPEG', quality=92)
@@ -1478,7 +1535,7 @@ def _normalize_image_file(image_path: str):
 
 
 def _embed_mp3_thumbnail(mp3_path: str, image_path: str) -> bool:
-    if mutagen is None:
+    if _mod_mutagen() is None:
         return False
     try:
         from mutagen.mp3 import MP3
@@ -1516,7 +1573,7 @@ def _embed_mp3_thumbnail(mp3_path: str, image_path: str) -> bool:
 
 def _embed_artwork_bytes(mp3_path: str, image_bytes: bytes) -> bool:
     """Embed raw image bytes into an MP3, normalizing the format first."""
-    if mutagen is None or not image_bytes:
+    if _mod_mutagen() is None or not image_bytes:
         return False
     try:
         from mutagen.mp3 import MP3
@@ -1559,10 +1616,11 @@ def _get_source_thumbnail_url(source_ref: Optional[str]) -> Optional[str]:
     Works for a direct video link as well as a `ytsearchN:...` spec (in which
     case the first result's thumbnail is returned).
     """
-    if yt_dlp is None or not source_ref:
+    _ytdlp_mod = _mod_yt_dlp()
+    if _ytdlp_mod is None or not source_ref:
         return None
     try:
-        with yt_dlp.YoutubeDL(cast(Any, {'quiet': True, 'noplaylist': True, 'skip_download': True})) as ydl:
+        with _ytdlp_mod.YoutubeDL(cast(Any, {'quiet': True, 'noplaylist': True, 'skip_download': True})) as ydl:
             info = ydl.extract_info(source_ref, download=False)
             if not isinstance(info, dict):
                 return None
@@ -1733,8 +1791,9 @@ def _build_soundcloud_search_query(raw_input: str) -> Optional[str]:
     SoundCloud track URL. Instead, we search YouTube for the specific track.
     """
     try:
-        if yt_dlp is not None:
-            with yt_dlp.YoutubeDL({'quiet': True, 'noplaylist': True}) as ydl_meta:
+        _ytdlp_mod = _mod_yt_dlp()
+        if _ytdlp_mod is not None:
+            with _ytdlp_mod.YoutubeDL({'quiet': True, 'noplaylist': True}) as ydl_meta:
                 info = ydl_meta.extract_info(raw_input, download=False)
                 if isinstance(info, dict):
                     # If it's a playlist/album, take the first entry
@@ -1856,7 +1915,7 @@ def _embed_artwork_lossless(filepath, ext, status_callback, detail_callback,
                               source_ref=None, thumbnail_url=None):
     """Embed cover art into FLAC/Opus/Ogg using mutagen's native handlers."""
     callback = detail_callback or status_callback
-    if mutagen is None:
+    if _mod_mutagen() is None:
         callback(f"Saved as {ext.lstrip('.').upper()} (mutagen not available for artwork).", "#f39c12")
         return
 
@@ -2088,7 +2147,7 @@ def _fallback_download_with_ytdlp_exe(
         if fmt['quality']:
             cmd += ['--audio-quality', fmt['quality']]
         # Raw WAV has no place for embedded covers/metadata via ID3 hooks.
-        if mutagen is not None and fmt['codec'] != 'wav':
+        if _mod_mutagen() is not None and fmt['codec'] != 'wav':
             cmd += ['--embed-thumbnail', '--add-metadata']
     else:
         cmd += ['-f', 'bestvideo*+bestaudio/best']
@@ -2436,7 +2495,7 @@ def write_id3_tags(filepath: str, artist: str = "", title: str = "", album: str 
     Uses mutagen. Safe to call with empty metadata (returns False). Also embeds
     album artwork from artwork_path (or a sidecar thumbnail next to the file).
     """
-    if mutagen is None:
+    if _mod_mutagen() is None:
         return False
     if not filepath or not os.path.exists(filepath):
         return False
@@ -2624,7 +2683,7 @@ def _search_and_download_best(query_text: str, ydl_opts: dict,
     Returns the chosen entry (so callers can report its title / use its known
     thumbnail without any extra lookups), or None on failure.
     """
-    if yt_dlp is None or not query_text:
+    if _mod_yt_dlp() is None or not query_text:
         return None
     search_term, query_tokens = _prepare_search(query_text)
     if not query_tokens:
@@ -2712,7 +2771,7 @@ def download_track(
     is_soundcloud = 'soundcloud.com/' in raw_input.lower() or 'snd.sc/' in raw_input.lower()
 
     # If Python module missing, use exe fallback for the actual download.
-    python_can_download = yt_dlp is not None
+    python_can_download = _mod_yt_dlp() is not None
 
     def _finish_audio_success(download_folder_name: str, source_ref: str,
                              thumbnail_url: Optional[str] = None) -> bool:
@@ -3001,9 +3060,10 @@ def download_track(
                 status_callback("Link protected. Reading track info...", "#f1c40f")
             track_title, artist_name = "", ""
 
-            if python_can_download and yt_dlp is not None:
+            _ytdlp_mod = _mod_yt_dlp()
+            if python_can_download and _ytdlp_mod is not None:
                 try:
-                    with yt_dlp.YoutubeDL({'quiet': True}) as ydl_meta:
+                    with _ytdlp_mod.YoutubeDL({'quiet': True}) as ydl_meta:
                         info = ydl_meta.extract_info(raw_input, download=False)
                         track_title = info.get('title', '')
                         artist_name = info.get('artist', info.get('uploader', ''))
@@ -3070,21 +3130,22 @@ def process_studio_dsp(input_path, speed_factor, reverb_wet):
         return None, None
 
     # Ensure pedalboard and related IO are available
-    if AudioFile is None or Pedalboard is None or Reverb is None:
+    _AudioFile, _Pedalboard, _Reverb = _dsp_backends()
+    if _AudioFile is None or _Pedalboard is None or _Reverb is None:
         raise RuntimeError(
             "Missing dependency: 'pedalboard' and/or its components are required for DSP processing.\n"
             "Install it in your active environment with:\n"
             "    python -m pip install pedalboard"
         )
 
-    with AudioFile(input_path) as f:
+    with _AudioFile(input_path) as f:
         audio_data = f.read(f.frames)
         sr = cast(int, f.samplerate)
 
     new_sample_rate = int(sr * speed_factor)
 
-    board = Pedalboard([
-        Reverb(room_size=0.5, wet_level=reverb_wet, dry_level=0.85)
+    board = _Pedalboard([
+        _Reverb(room_size=0.5, wet_level=reverb_wet, dry_level=0.85)
     ])
 
     processed_data = board(audio_data, sr)
@@ -3278,7 +3339,7 @@ def download_video_mp4(
     if progress_callback:
         ydl_opts['progress_hooks'] = [build_progress_hook(status_callback, progress_callback)]
 
-    python_can_download = yt_dlp is not None
+    python_can_download = _mod_yt_dlp() is not None
 
     def _try_download(opts):
         if not python_can_download:
@@ -3427,9 +3488,10 @@ def download_video_mp4(
             status_callback("Primary download failed. Attempting fallback search...", "#f39c12")
             title = None
 
-            if python_can_download and yt_dlp is not None:
+            _ytdlp_mod = _mod_yt_dlp()
+            if python_can_download and _ytdlp_mod is not None:
                 try:
-                    with yt_dlp.YoutubeDL({'quiet': True}) as ydl_meta:
+                    with _ytdlp_mod.YoutubeDL({'quiet': True}) as ydl_meta:
                         info = ydl_meta.extract_info(url, download=False)
                         title = info.get('title') if isinstance(info, dict) else None
                 except Exception:
