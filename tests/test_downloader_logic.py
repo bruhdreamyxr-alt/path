@@ -39,6 +39,34 @@ class PerfConfigTests(unittest.TestCase):
         cfg = downloader.perf_cfg_from_prefs({"aria2_connections": -5})
         self.assertEqual(cfg["aria2_connections"], 1)
 
+    def test_fragment_downloads_clamped_high(self):
+        """A hand-edited prefs value must not reach yt-dlp unbounded."""
+        cfg = downloader.perf_cfg_from_prefs(
+            {"concurrent_fragment_downloads": 999999})
+        self.assertEqual(cfg["concurrent_fragment_downloads"],
+                         downloader.FRAGMENT_DOWNLOADS_MAX)
+
+    def test_fragment_downloads_clamped_low(self):
+        """0 is the quiet failure: yt-dlp accepts it and fetches serially."""
+        for value in (0, -5):
+            cfg = downloader.perf_cfg_from_prefs(
+                {"concurrent_fragment_downloads": value})
+            self.assertEqual(cfg["concurrent_fragment_downloads"], 1, value)
+
+    def test_fragment_downloads_invalid_falls_back_to_the_default(self):
+        cfg = downloader.perf_cfg_from_prefs(
+            {"concurrent_fragment_downloads": "abc"})
+        self.assertEqual(
+            cfg["concurrent_fragment_downloads"],
+            downloader.DEFAULT_PERF_CONFIG["concurrent_fragment_downloads"])
+
+    def test_a_realistic_setting_survives_the_clamp(self):
+        """The clamp must not quietly cap the value the slider can produce."""
+        for value in (1, 8, 16, downloader.FRAGMENT_DOWNLOADS_MAX):
+            cfg = downloader.perf_cfg_from_prefs(
+                {"concurrent_fragment_downloads": value})
+            self.assertEqual(cfg["concurrent_fragment_downloads"], value)
+
     def test_aria2_connections_invalid_string(self):
         cfg = downloader.perf_cfg_from_prefs({"aria2_connections": "abc"})
         self.assertEqual(cfg["aria2_connections"], 16)

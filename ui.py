@@ -1164,6 +1164,18 @@ class UniversalAudioStudio(ctk.CTk):
             "audio_format": "mp3_vbr",
             "window_geometry": "",
             "window_maximized": False,
+            # Performance settings. These must be declared here, not just
+            # written: _load_prefs keeps only keys already in this table, so a
+            # written-but-undeclared key is dropped on every launch - and the
+            # next save persists the truncated table, so the value is destroyed
+            # rather than merely ignored. That is why "concurrent fragment
+            # downloads" kept reverting to 8 no matter what was applied.
+            # The defaults are downloader.DEFAULT_PERF_CONFIG's, kept in step by
+            # the test that compares the two tables.
+            "use_aria2": True,
+            "aria2_connections": 16,
+            "concurrent_fragment_downloads": 8,
+            "max_video_resolution": "Best (up to 4K)",
         }
 
     def _load_prefs(self) -> dict:
@@ -4329,7 +4341,11 @@ class UniversalAudioStudio(ctk.CTk):
         self.aria2_conn_slider.pack(padx=16, pady=(0, 2), fill="x")
 
         ctk.CTkLabel(tuning, text="Concurrent fragment downloads:", font=UITheme.F(12)).pack(anchor="w", padx=16, pady=(2, 0))
-        self.concurrent_frag_slider = ctk.CTkSlider(tuning, from_=1, to=32, number_of_steps=31)
+        # Range comes from downloader so the slider and the clamp that reads the
+        # saved value can never disagree about what the maximum is.
+        self.concurrent_frag_slider = ctk.CTkSlider(
+            tuning, from_=1, to=downloader.FRAGMENT_DOWNLOADS_MAX,
+            number_of_steps=downloader.FRAGMENT_DOWNLOADS_MAX - 1)
         self.concurrent_frag_slider.set(_saved_frags)
         self.concurrent_frag_slider.pack(padx=16, pady=(0, 2), fill="x")
 

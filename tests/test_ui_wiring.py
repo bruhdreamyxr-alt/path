@@ -16,6 +16,8 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -23,6 +25,13 @@ from unittest import mock
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 _HAS_CTK = importlib.util.find_spec("customtkinter") is not None
+
+# downloader is pure Python (no Tk), so the bundle-helper search can be
+# exercised on a machine without a display. It is imported unconditionally so
+# BundleHelperSearchTests does not silently skip in CI.
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+import downloader  # noqa: E402
 
 # The custom-theme editor tests drive the real window, so they need ctk and ui.
 # Both are optional for the rest of this file, which is source-level only: the
@@ -35,7 +44,6 @@ ctk: Any
 ui: Any
 
 if _HAS_CTK:
-    import sys
     if str(_REPO) not in sys.path:
         sys.path.insert(0, str(_REPO))
     import customtkinter as ctk  # type: ignore[no-redef]
@@ -2062,6 +2070,213 @@ class CustomThemeEditorTests(unittest.TestCase):
                 self.assertNotEqual(
                     ui._normalize_hex(got), ui.COLOR_THEMES['Midnight']['bg'],
                     "%s well kept the palette it started with" % page)
+
+
+class PrefDeclarationTests(unittest.TestCase):
+    """Every pref the app writes must be declared in ``_default_prefs``.
+
+    ``_load_prefs`` keeps only keys already present in the defaults table
+    (``defaults.update({k: v for k, v in data.items() if k in defaults})``).
+    That guard is deliberate - it stops a corrupt or hand-edited file inventing
+    settings - but it makes ``_default_prefs`` the real schema. A key that is
+    written without being declared is therefore dropped on *every* launch, and
+    the next save persists the truncated table, so the user's value is destroyed
+    rather than merely ignored.
+
+    That is not hypothetical: all four Performance settings (use_aria2,
+    aria2_connections, concurrent_fragment_downloads, max_video_resolution)
+    were written but never declared, so "concurrent fragment downloads" reverted
+    to 8 on every start no matter what was applied.
+    """
+
+    def _declared(self):
+        body = _method_source("_default_prefs")
+        return set(re.findall(r'["\']([a-z_0-9]+)["\']\s*:', body))
+    def _written(self):
+        return set(re.findall(r"_set_pref\(\s*['\"]([a-z_0-9]+)['\"]", _source()))
+
+    def test_no_written_pref_is_missing_from_the_defaults_table(self):
+        missing = self._written() - self._declared()
+        self.assertEqual(
+            missing, set(),
+            "written but not declared, so dropped on every load: %s"
+            % sorted(missing))
+
+    def test_the_performance_settings_are_declared(self):
+        """Named explicitly, so the regression names itself if it ever returns."""
+        declared = self._declared()
+        for key in ("use_aria2", "aria2_connections",
+                    "concurrent_fragment_downloads", "max_video_resolution"):
+            self.assertIn(key, declared)
+
+    def test_the_declared_perf_defaults_match_the_downloader_ones(self):
+        """Two default tables would drift the moment either side is edited.
+
+        The UI reads downloader.DEFAULT_PERF_CONFIG for the live config but
+        _default_prefs for the on-disk value, so a mismatch shows up as a
+        control sitting at a position the slider was never told about.
+        """
+        body = _method_source("_default_prefs")
+        for key in ("use_aria2", "aria2_connections",
+                    "concurrent_fragment_downloads", "max_video_resolution"):
+            m = re.search(r'["\']%s["\']\s*:\s*([^,\n]+)' % re.escape(key), body)
+            self.assertIsNotNone(m, key)
+            assert m is not None  # narrows the Optional for the type checker
+            self.assertEqual(eval(m.group(1).strip()),  # noqa: S307
+                             downloader.DEFAULT_PERF_CONFIG[key], key)
+
+
+@requires_ctk
+class PerformanceSettingsPersistTests(unittest.TestCase):
+    """The Performance page's controls must survive a restart.
+
+    The user-facing symptom was "concurrent fragments resets every time I open
+    the app", which read like a slider that never applied. It applied fine - the
+    value was written to disk and then dropped on the next load, and the save
+    after that removed it from the file entirely.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._pref = os.path.join(self._tmpdir.name, "ui_prefs.json")
+        with open(self._pref, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        patcher = mock.patch.object(
+            ui.UniversalAudioStudio, "_get_pref_path",
+            lambda _app, _p=self._pref: _p)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.app = self._build()
+
+    def _build(self):
+        app = ui.UniversalAudioStudio()
+        app.withdraw()
+        app.update_idletasks()
+        return app
+
+    def _reopen(self):
+        """Close the window and stand a fresh one up on the same prefs file."""
+        try:
+            self.app.destroy()
+        except Exception:
+            pass
+        self.app = self._build()
+        return self.app
+
+    def tearDown(self):
+        try:
+            self.app.destroy()
+        except Exception:
+            pass
+        self._tmpdir.cleanup()
+
+    def test_the_fragment_slider_keeps_its_value_across_a_restart(self):
+        self.app.concurrent_frag_slider.set(24)
+        self.app.apply_performance_settings()
+        self.assertEqual(self._reopen().concurrent_frag_slider.get(), 24)
+
+    def test_the_aria2_connection_slider_keeps_its_value_across_a_restart(self):
+        self.app.aria2_conn_slider.set(9)
+        self.app.apply_performance_settings()
+        self.assertEqual(self._reopen().aria2_conn_slider.get(), 9)
+
+    def test_the_aria2_toggle_keeps_its_value_across_a_restart(self):
+        self.app.aria2_var.set(False)
+        self.app.apply_performance_settings()
+        self.assertFalse(self._reopen().aria2_var.get())
+
+    def test_the_applied_value_stays_on_disk_after_a_restart(self):
+        """Not just reloaded correctly - not deleted from the file.
+
+        The load dropped the key and the next save persisted the truncated table,
+        so the user's number was gone for good even though the control still
+        looked right in the session that had set it.
+        """
+        self.app.concurrent_frag_slider.set(24)
+        self.app.apply_performance_settings()
+        self._reopen()
+        with open(self._pref, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["concurrent_fragment_downloads"], 24)
+
+    def test_the_slider_range_and_the_clamp_agree_on_the_maximum(self):
+        """The slider and the saved-value clamp must not disagree.
+
+        The UI builds the slider from downloader.FRAGMENT_DOWNLOADS_MAX; a
+        literal in either place would let the control offer a value the clamp
+        then silently rewrites, so the setting would appear not to stick.
+        """
+        src = pathlib.Path(ui.__file__).read_text(encoding="utf-8")
+        match = re.search(r"concurrent_frag_slider = .*?\n\n", src, re.DOTALL)
+        self.assertTrue(match, "could not find the fragment slider in ui.py")
+        body = match.group(0) if match else ""
+        self.assertIn("downloader.FRAGMENT_DOWNLOADS_MAX", body)
+        self.assertNotIn("to=32", body)
+
+    def test_the_resolution_cap_survives_a_restart(self):
+        self.app.video_res_var.set("720p")
+        self.app._on_video_res_change("720p")
+        self.assertEqual(self._reopen().video_res_var.get(), "720p")
+
+
+class BundleHelperSearchTests(unittest.TestCase):
+    """Bundled helpers have to be found inside a PyInstaller onedir bundle.
+
+    PyInstaller 6 collects binaries into a ``_internal`` subfolder *next to* the
+    app EXE, not into the EXE's own folder. ``find_bundled_exe`` documented
+    searching ``_internal`` but only ever checked ``sys._MEIPASS`` (the onefile
+    extraction dir) and the EXE's folder, so a shipped
+    ``_internal\\aria2c.exe`` was reported to the user as "aria2 is NOT
+    installed on your system" - with the file sitting a few hundred KB away.
+    """
+
+    def _bundle_with(self, *relpaths):
+        """A fake onedir bundle; returns (bundle dir, {relpath: abspath})."""
+        bundle = tempfile.mkdtemp(prefix="bundle_")
+        self.addCleanup(shutil.rmtree, bundle, True)
+        made = {}
+        for rel in relpaths:
+            path = os.path.join(bundle, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("")
+            made[rel] = path
+        return bundle, made
+
+    def _pretend_running_from(self, bundle):
+        """Point sys.executable at the bundle and hide PATH."""
+        real_executable, real_which = sys.executable, shutil.which
+        sys.executable = os.path.join(bundle, "AudioDownloader.exe")
+        shutil.which = lambda *_a, **_k: None  # ignore PATH for these checks
+        self.addCleanup(lambda: setattr(sys, "executable", real_executable))
+        self.addCleanup(lambda: setattr(shutil, "which", real_which))
+
+    def test_the_internal_subfolder_is_searched(self):
+        dirs = downloader._bundle_search_dirs()
+        self.assertTrue(any(d.endswith("_internal") for d in dirs),
+                        "no _internal candidate: %s" % dirs)
+
+    def test_a_helper_in_the_internal_folder_is_found(self):
+        bundle, made = self._bundle_with("_internal/aria2c.exe")
+        self._pretend_running_from(bundle)
+        self.assertEqual(downloader.find_bundled_exe("aria2c.exe"),
+                         made["_internal/aria2c.exe"])
+        self.assertEqual(downloader.get_fast_downloader_path(),
+                         made["_internal/aria2c.exe"])
+
+    def test_a_helper_next_to_the_exe_is_still_found(self):
+        """The fix adds _internal; it must not have replaced the old search."""
+        bundle, made = self._bundle_with("yt-dlp.exe")
+        self._pretend_running_from(bundle)
+        self.assertEqual(downloader.find_bundled_exe("yt-dlp.exe"),
+                         made["yt-dlp.exe"])
+
+    def test_a_missing_helper_is_still_reported_as_missing(self):
+        """The negative case: the search must not resolve to a wrong path."""
+        bundle, _ = self._bundle_with()
+        self._pretend_running_from(bundle)
+        self.assertIsNone(
+            downloader.find_bundled_exe("definitely_absent.exe"))
 
 
 class FormControlThemeTests(unittest.TestCase):

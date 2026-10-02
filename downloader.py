@@ -205,6 +205,27 @@ def _clamp_aria2_connections(value) -> int:
     return max(1, min(conn, ARIA2_MAX_CONNECTIONS))
 
 
+# The Performance page's fragment slider spans 1..FRAGMENT_DOWNLOADS_MAX, and
+# this is the clamp that keeps the two in step.
+FRAGMENT_DOWNLOADS_MAX = 32
+
+
+def _clamp_fragment_downloads(value) -> int:
+    """Keep yt-dlp's fragment concurrency inside a range that actually works.
+
+    The slider can only produce 1..32, so this only matters for a hand-edited or
+    corrupted prefs value - but the failure is quiet rather than loud: yt-dlp
+    accepts 0 and negative numbers without complaint, and 0 simply means
+    fragments are fetched one at a time. A user who edited the file to 500000
+    would open 500000 sockets.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = DEFAULT_PERF_CONFIG['concurrent_fragment_downloads']
+    return max(1, min(n, FRAGMENT_DOWNLOADS_MAX))
+
+
 def perf_cfg_from_prefs(prefs: Optional[dict] = None) -> dict:
     """Build a sanitized perf config from saved prefs (or defaults).
 
@@ -217,12 +238,9 @@ def perf_cfg_from_prefs(prefs: Optional[dict] = None) -> dict:
     cfg['use_aria2'] = bool(prefs.get('use_aria2', DEFAULT_PERF_CONFIG['use_aria2']))
     cfg['aria2_connections'] = _clamp_aria2_connections(
         prefs.get('aria2_connections', DEFAULT_PERF_CONFIG['aria2_connections']))
-    try:
-        cfg['concurrent_fragment_downloads'] = int(
-            prefs.get('concurrent_fragment_downloads',
-                      DEFAULT_PERF_CONFIG['concurrent_fragment_downloads']))
-    except (TypeError, ValueError):
-        cfg['concurrent_fragment_downloads'] = DEFAULT_PERF_CONFIG['concurrent_fragment_downloads']
+    cfg['concurrent_fragment_downloads'] = _clamp_fragment_downloads(
+        prefs.get('concurrent_fragment_downloads',
+                  DEFAULT_PERF_CONFIG['concurrent_fragment_downloads']))
     try:
         cfg['http_chunk_size'] = int(prefs.get('http_chunk_size', DEFAULT_PERF_CONFIG['http_chunk_size']))
     except (TypeError, ValueError):
@@ -312,23 +330,39 @@ def _get_user_data_dir() -> str:
     return get_base_dir()
 
 
+def _bundle_search_dirs() -> list:
+    """Every folder a bundled helper may live in, most specific first.
+
+    PyInstaller 6 in onedir mode puts the collected binaries in a ``_internal``
+    subfolder *next to* the app EXE, not in the EXE's own folder. Only the
+    onefile extraction dir (``sys._MEIPASS``) is handled by the first candidate
+    below, so a onedir build had no candidate for ``_internal`` at all - which
+    is why a shipped ``_internal\\aria2c.exe`` was reported as "aria2 not
+    installed" while the file sat a few hundred KB from the executable.
+    """
+    dirs = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dirs.append(meipass)
+    exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "") or ""))
+    if exe_dir:
+        # onedir bundle: <app dir>\\ and <app dir>\\_internal\\
+        dirs.append(os.path.join(exe_dir, "_internal"))
+        dirs.append(exe_dir)
+    dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    return dirs
+
+
 def find_bundled_exe(name: str, include_path: bool = False) -> Optional[str]:
     """Locate a helper executable shipped with the app.
 
-    Search order: PyInstaller bundle dir (``_internal`` for 6.x onedir, the
+    Search order: the PyInstaller bundle dir (``_internal`` for 6.x onedir, the
     temp extraction dir for onefile), the folder next to the app EXE, the
     source folder, then PATH when *include_path* is true. Returns ``None``
     when not found.
     """
-    candidates = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(os.path.join(meipass, name))
-    exe_dir = os.path.dirname(os.path.abspath(getattr(sys, "executable", "") or ""))
-    if exe_dir:
-        candidates.append(os.path.join(exe_dir, name))
-    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), name))
-    for candidate in candidates:
+    for folder in _bundle_search_dirs():
+        candidate = os.path.join(folder, name)
         if os.path.isfile(candidate):
             return candidate
     if include_path:
@@ -1078,7 +1112,9 @@ def build_fast_yt_dlp_options(base_dir, output_template, audio_only: bool = Fals
 
     # Apply tuned concurrency settings
     try:
-        ydl_opts['concurrent_fragment_downloads'] = int(cfg.get('concurrent_fragment_downloads', ydl_opts['concurrent_fragment_downloads']))
+        ydl_opts['concurrent_fragment_downloads'] = _clamp_fragment_downloads(
+            cfg.get('concurrent_fragment_downloads',
+                    ydl_opts['concurrent_fragment_downloads']))
         ydl_opts['http_chunk_size'] = int(cfg.get('http_chunk_size', ydl_opts['http_chunk_size']))
     except Exception:
         pass
@@ -2062,7 +2098,9 @@ def _fallback_download_with_ytdlp_exe(
     # Concurrency knobs: best-effort, older yt-dlp.exe may not support them
     concurrency_flags = []
     try:
-        concurrency_flags += ['--concurrent-fragment-downloads', str(int(cfg.get('concurrent_fragment_downloads', 8)))]
+        concurrency_flags += ['--concurrent-fragment-downloads',
+                               str(_clamp_fragment_downloads(
+                                   cfg.get('concurrent_fragment_downloads', 8)))]
     except Exception:
         pass
     try:
