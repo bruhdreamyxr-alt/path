@@ -1989,15 +1989,35 @@ class CustomThemeEditorTests(unittest.TestCase):
         self.assertEqual(self.app._palette['accent'], before)
         self.assertTrue(toasts, 'an invalid value must say so')
 
-    def test_report_reads_pass_then_fail(self):
+    def test_no_contrast_text_is_shown_on_the_theme_page(self):
+        """The custom-theme card must not print a pass/fail line.
+
+        It read as an error message even when it was reporting success, which
+        is worse than showing nothing: "All contrast checks pass" sitting under
+        your colour swatches looks like something has gone wrong. The contrast
+        checking itself is not gone - it still runs offline in
+        tools/audit_contrast.py and in the tests below - it just is not
+        surfaced as UI copy any more.
+        """
         self.app.start_custom_from('Dracula')
         self.app._refresh_custom_theme_ui()
-        passing = self.app._custom_report.cget('text')
-        self.assertIn('pass', passing.lower())
-        self.app.set_custom_role('text', '#101010')  # unreadable on its own bg
-        failing = self.app._custom_report.cget('text')
-        self.assertIn('below target', failing.lower())
-        self.assertNotEqual(failing, passing)
+        self.assertFalse(
+            hasattr(self.app, '_custom_report'),
+            "the contrast report label must not be created any more",
+        )
+        texts = []
+        for widget in self.app._iter_widgets():
+            try:
+                value = widget.cget('text')
+            except Exception:
+                continue
+            if isinstance(value, str):
+                texts.append(value.lower())
+        for phrase in ('contrast check', 'below target', 'all contrast'):
+            self.assertFalse(
+                any(phrase in t for t in texts),
+                "found %r still displayed on the page" % phrase,
+            )
 
     def test_mode_switch_rebases_the_fallback_palette(self):
         """With nothing overridden, switching mode has to move the palette.
@@ -2277,6 +2297,26 @@ class BundleHelperSearchTests(unittest.TestCase):
         self._pretend_running_from(bundle)
         self.assertIsNone(
             downloader.find_bundled_exe("definitely_absent.exe"))
+
+    def test_the_not_found_message_names_the_real_search_folders(self):
+        """The dialog must not send the user to a folder we never look in.
+
+        It used to say "place aria2c.exe next to the app EXE", which is exactly
+        wrong for a packaged build: PyInstaller puts the collected binaries in
+        _internal *beside* the EXE, so a user following that instruction to the
+        letter would still get "aria2 was NOT found". The message now lists
+        the folders _bundle_search_dirs() actually returns.
+        """
+        body = _method_source("apply_performance_settings")
+        self.assertNotIn("next to the app EXE", body)
+        self.assertIn("downloader._bundle_search_dirs()", body)
+        # And the list it prints has to actually contain the _internal folder,
+        # which is the one a packaged build uses.
+        bundle, made = self._bundle_with("_internal/aria2c.exe")
+        self._pretend_running_from(bundle)
+        self.assertTrue(any("_internal" in d for d in
+                            downloader._bundle_search_dirs()),
+                        downloader._bundle_search_dirs())
 
 
 class FormControlThemeTests(unittest.TestCase):

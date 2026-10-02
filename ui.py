@@ -4443,12 +4443,23 @@ class UniversalAudioStudio(ctk.CTk):
                 else:
                     # The install instructions are too long for a toast;
                     # this one stays a real dialog.
+                    #
+                    # The old wording here pointed users at the EXE's own
+                    # folder, which is wrong for a packaged build: PyInstaller's
+                    # onedir layout puts the collected binaries in an _internal
+                    # subfolder *beside* the EXE, so a user who followed that
+                    # instruction to the letter still got "aria2 was NOT found".
+                    # List the folders that are actually searched instead, so
+                    # the message cannot send anyone somewhere we never look.
+                    _searched = downloader._bundle_search_dirs()
+                    _where = "\n".join("    - %s" % d for d in _searched)
                     _msg = (
                         "Settings applied, but aria2 was NOT found on your system.\n\n"
                         "The 'use aria2' toggle will have no effect until aria2 is installed.\n\n"
                         "To get aria2:\n"
                         "  1. Download from https://aria2.github.io/\n"
-                        "  2. Place aria2c.exe next to the app EXE (or in the same folder as ui.py)\n"
+                        "  2. Copy aria2c.exe into one of these folders:\n"
+                        f"{_where}\n"
                         "  3. Restart the app\n\n"
                         "Or install via package manager:\n"
                         "  - Windows: choco install aria2   (or scoop install aria2)\n"
@@ -6020,16 +6031,6 @@ class UniversalAudioStudio(ctk.CTk):
                 row_index += 1
         grid.grid_columnconfigure(2, weight=1)
 
-        # The report gets its own row. Sharing a row with the Dark/Light menu and Reset
-        # let the report's wrapped text grow into them and clip both off the right
-        # edge, and the page now scrolls anyway, so the extra line costs nothing.
-        self._custom_report = ctk.CTkLabel(
-            card, text="", font=UITheme.F(10), anchor="w", wraplength=700,
-            justify="left",
-        )
-        self._custom_report.pack(fill="x", padx=16, pady=(0, 10))
-        setattr(self._custom_report, "_theme_roles", {"text_color": "sub"})
-
         # Displayed capitalised, stored lowercase: the mode key is compared
         # against 'light' in custom_palette and is written to prefs as-is.
         self._custom_mode_var = tk.StringVar(
@@ -6124,27 +6125,6 @@ class UniversalAudioStudio(ctk.CTk):
                 pass
         try:
             self._custom_mode_var.set(self._custom_mode.capitalize())
-        except Exception:
-            pass
-
-        # The report: name the failures, with the ratio, so a user can act.
-        bad = contrast_failures(pal)
-        if bad:
-            worst = sorted(bad, key=lambda r: r[3])[:3]
-            detail = "; ".join(
-                "%s on %s %.1f:1 (needs %g)" % (fg, bg, got, need)
-                for fg, bg, need, got in worst)
-            text = "%d contrast check(s) below target — %s" % (len(bad), detail)
-            color = UITheme.COLOR_DANGER
-        else:
-            text = ("All contrast checks pass. "
-                    "Small text needs 4.5:1, accents and status colours 3:1.")
-            color = UITheme.COLOR_SUCCESS
-        try:
-            self._custom_report.configure(text=text, text_color=color)
-            # Tagged as a fixed value on purpose: a failure has to stay red
-            # while the palette it refers to is changing underneath it.
-            setattr(self._custom_report, "_theme_roles", {})
         except Exception:
             pass
 
