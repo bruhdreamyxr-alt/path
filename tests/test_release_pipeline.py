@@ -284,6 +284,45 @@ class WindowsToolingTests(unittest.TestCase):
             self.assertIn(name, spec)
             self.assertIn(name, fetcher)
 
+    def test_every_lazy_import_is_declared_to_pyinstaller(self):
+        """A dynamic import is invisible to PyInstaller's static analysis.
+
+        downloader.py resolves yt_dlp/mutagen/PIL/soundfile through
+        ``importlib.import_module(<variable>)`` and ui.py imports Pillow inside a
+        function. PyInstaller only follows literal ``import x`` and a literal
+        ``import_module()``, so a frozen build left these out would import
+        cleanly and then fail at runtime - the first time a user tags a file,
+        draws an icon, or loads the studio. The spec's hiddenimports is the only
+        thing keeping them in, so pin the two lists together.
+        """
+        import ast
+
+        spec = _read("UniversalAudioStudio.spec")
+        declared = set(re.findall(r"'([A-Za-z_][\w.]*)'", spec))
+
+        # Every name handed to _optional_import('...') in downloader.py.
+        tree = ast.parse(_read("downloader.py"))
+        called = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_optional_import"
+                    and node.args and isinstance(node.args[0], ast.Constant)):
+                called.add(node.args[0].value)
+        self.assertTrue(called, "found no _optional_import calls to check")
+        for name in called:
+            self.assertIn(name, declared,
+                          "%r is imported dynamically but is not in the spec's "
+                          "hiddenimports - a frozen build would miss it" % name)
+
+        # The pedalboard trio goes through _dsp_backends().
+        self.assertIn("pedalboard", declared)
+        self.assertIn("pedalboard.io", declared)
+
+        # ui.py's Pillow helper, same story.
+        self.assertIn("PIL.Image", declared)
+        self.assertIn("PIL.ImageDraw", declared)
+
     def test_installer_takes_version_and_name_from_the_command_line(self):
         text = _read("installer_200.iss")
         self.assertIn("#ifndef AppVersion", text)

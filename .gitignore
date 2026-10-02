@@ -21,6 +21,17 @@ dist/
 mysetup*.exe
 *.bak
 
+# Local diagnostic scratch: the frozen-runtime probe and any screenshots taken
+# while debugging a build. _frozen_probe.py IS tracked on purpose - it is the
+# only way to prove the lazy imports and the _internal helper lookup inside a
+# real bundle - but these byproducts of running it are not.
+_shot.png
+_*_build.log
+_app_out.txt
+_app_err.txt
+_probe_build.log
+probe_out.txt
+
 # ---------------------------------------------------------------
 # Local environments and caches
 # ---------------------------------------------------------------

@@ -404,7 +404,24 @@ def _bundle_search_dirs() -> list:
         dirs.append(os.path.join(exe_dir, "_internal"))
         dirs.append(exe_dir)
     dirs.append(os.path.dirname(os.path.abspath(__file__)))
-    return dirs
+
+    # A frozen onedir build has sys._MEIPASS *pointing at* the _internal folder,
+    # and __file__ living inside it too, so all three candidates above collapse
+    # to the same path and the list reads "X, X, X" - which now looks bad,
+    # because the aria2 dialog prints these folders to the user. Order is
+    # preserved, first occurrence wins, and paths are compared case-insensitively
+    # because Windows does.
+    seen = set()
+    unique = []
+    for folder in dirs:
+        if not folder:
+            continue
+        key = os.path.normcase(os.path.abspath(folder))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(folder)
+    return unique
 
 
 def find_bundled_exe(name: str, include_path: bool = False) -> Optional[str]:

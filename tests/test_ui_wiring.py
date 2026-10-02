@@ -2238,6 +2238,43 @@ class PerformanceSettingsPersistTests(unittest.TestCase):
         self.app._on_video_res_change("720p")
         self.assertEqual(self._reopen().video_res_var.get(), "720p")
 
+    def test_a_corrupt_prefs_file_falls_back_to_defaults(self):
+        """A truncated or hand-mangled file must not take the app down.
+
+        _load_prefs swallows the parse error and returns the defaults, which is
+        what keeps a bad write from turning into a window that will not open.
+        """
+        with open(self._pref, "w", encoding="utf-8") as fh:
+            fh.write("{this is not json")
+        app = self._reopen()
+        self.assertEqual(app._prefs, app._default_prefs())
+        self.assertEqual(app.concurrent_frag_slider.get(),
+                         downloader.DEFAULT_PERF_CONFIG["concurrent_fragment_downloads"])
+
+    def test_the_loaded_values_reach_the_downloader_config(self):
+        """Persisting in the prefs file is not the same as being applied.
+
+        The slider value is only useful once it survives _load_prefs *and* the
+        config build, so both halves are asserted together.
+        """
+        self.app.concurrent_frag_slider.set(19)
+        self.app.aria2_conn_slider.set(11)
+        self.app.apply_performance_settings()
+        app = self._reopen()
+        cfg = downloader.perf_cfg_from_prefs(app._load_prefs())
+        self.assertEqual(cfg["concurrent_fragment_downloads"], 19)
+        self.assertEqual(cfg["aria2_connections"], 11)
+
+    def test_an_out_of_range_hand_edited_value_is_clamped_not_honoured(self):
+        """A hand-edited file must not be able to ask aria2 for 99999 sockets."""
+        with open(self._pref, "w", encoding="utf-8") as fh:
+            json.dump({"aria2_connections": 99999,
+                       "concurrent_fragment_downloads": 0}, fh)
+        app = self._reopen()
+        cfg = downloader.perf_cfg_from_prefs(app._load_prefs())
+        self.assertEqual(cfg["aria2_connections"], downloader.ARIA2_MAX_CONNECTIONS)
+        self.assertEqual(cfg["concurrent_fragment_downloads"], 1)
+
 
 class BundleHelperSearchTests(unittest.TestCase):
     """Bundled helpers have to be found inside a PyInstaller onedir bundle.
@@ -2297,6 +2334,27 @@ class BundleHelperSearchTests(unittest.TestCase):
         self._pretend_running_from(bundle)
         self.assertIsNone(
             downloader.find_bundled_exe("definitely_absent.exe"))
+
+    def test_the_search_list_has_no_repeated_folders(self):
+        """The aria2 dialog prints this list, so it has to read sensibly.
+
+        In a frozen onedir build sys._MEIPASS points at the _internal folder and
+        __file__ lives inside it, so the three natural candidates collapse to
+        one path and the list came out as "X, X, X".
+        """
+        bundle, made = self._bundle_with("_internal/aria2c.exe")
+        self._pretend_running_from(bundle)
+        dirs = downloader._bundle_search_dirs()
+        self.assertEqual(len(dirs), len(set(dirs)), dirs)
+
+        # And explicitly with _MEIPASS set to the same folder, as PyInstaller does.
+        real = getattr(sys, "_MEIPASS", None)
+        sys._MEIPASS = os.path.join(bundle, "_internal")
+        self.addCleanup(lambda: setattr(sys, "_MEIPASS", real)
+                        if real is not None else delattr(sys, "_MEIPASS"))
+        dirs = downloader._bundle_search_dirs()
+        self.assertEqual(len(dirs), len(set(dirs)), dirs)
+        self.assertEqual(dirs[0], os.path.join(bundle, "_internal"))
 
     def test_the_not_found_message_names_the_real_search_folders(self):
         """The dialog must not send the user to a folder we never look in.

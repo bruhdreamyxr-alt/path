@@ -26,8 +26,13 @@ def _bundle_if_exists(name):
 _ARIA2_DATAS = _bundle_if_exists('aria2c.exe')
 _FFPLAY_DATAS = _bundle_if_exists('ffplay.exe')
 
+# The probe entry point: a copy of the app spec that runs a diagnostic script
+# instead of the GUI, so the lazy imports and the _internal helper lookup can be
+# proven inside a real frozen bundle. Only built when asked for explicitly.
+_PROBE = os.environ.get('TUNELAB_FROZEN_PROBE')
+
 a = Analysis(
-    ['ui.py'],
+    [_PROBE] if _PROBE else ['ui.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -55,6 +60,16 @@ a = Analysis(
         'mutagen',
         'mutagen.mp3',
         'mutagen.id3',
+        # downloader.py and ui.py resolve these through
+        # importlib.import_module(<variable>), which PyInstaller's static
+        # analysis cannot follow - it only follows literal `import x` and a
+        # literal import_module(). Without them here a frozen build imports
+        # fine and then fails at runtime, the first time the user tags a file
+        # or draws an icon. Keep this list in step with the names
+        # _optional_import() / _lazy_import_pil() are called with.
+        'PIL.Image',
+        'PIL.ImageDraw',
+        'pedalboard.io',
     ],
     hookspath=[],
     hooksconfig={},
@@ -70,7 +85,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='UniversalAudioStudio',
+    name='UniversalAudioStudio' if not _PROBE else 'FrozenProbe',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -93,5 +108,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='UniversalAudioStudio',
+    name='UniversalAudioStudio' if not _PROBE else 'FrozenProbe',
 )
