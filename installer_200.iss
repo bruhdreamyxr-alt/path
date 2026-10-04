@@ -4,17 +4,17 @@
 ; installer can never drift from version.py. tools/build_windows.ps1 reads
 ; version.py and supplies both:
 ;
-;   ISCC.exe /DAppVersion=2.1.0 /DOutputBase=mysetup210 installer_200.iss
+;   ISCC.exe /DAppVersion=2.5.0 /DOutputBase=mysetup250 installer_200.iss
 ;
 ; The defaults below keep a bare `ISCC installer_200.iss` working for the
-; current 2.0.0 layout. Paths are relative because Inno resolves them against
+; current 2.5.0 layout. Paths are relative because Inno resolves them against
 ; this file: absolute paths worked on the author's machine only and would break
 ; the cloud build, whose checkout lives somewhere else entirely.
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.5.0"
 #endif
 #ifndef OutputBase
-  #define OutputBase "mysetup200"
+  #define OutputBase "mysetup250"
 #endif
 
 #define AppName "AudioDownloader"

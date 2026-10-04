@@ -6,5 +6,7 @@
 # 2.1.1 carries the hardened updater (see updater_cli.py): a locked file no longer
 # aborts the install partway, and the package writes the updater first so a
 # partial update still leaves the fixed one behind.
+#
+# 2.5.0 is the current release.
 
-__version__ = "2.1.3"
+__version__ = "2.5.0"
