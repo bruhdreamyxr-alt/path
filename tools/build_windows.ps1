@@ -4,9 +4,8 @@
     Build the Windows app, the self-update ZIP and the installer in one command.
 
 .DESCRIPTION
-    The Windows counterpart to tools/build_macos.sh, and the script the GitHub
-    Actions Windows job runs - so a release built on a runner is produced by
-    exactly the same steps as one built here.
+    The build script the GitHub Actions Windows job runs - so a release built on
+    a runner is produced by exactly the same steps as one built here.
 
     Outputs:
         dist\UniversalAudioStudio\UniversalAudioStudio.exe             the app
@@ -70,8 +69,9 @@ function Invoke-Checked {
 }
 
 function Get-AppVersion {
-    # Reuse the same helper the macOS build uses instead of re-implementing the
-    # version.py parse here and letting the two drift apart.
+    # Parse version.py in exactly one place (tools/get_version.py) rather than
+    # re-implementing it here and letting the two drift apart - the release
+    # workflow's tag check reads the version the same way.
     $version = (& $Python (Join-Path 'tools' 'get_version.py') | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
         Fail 'could not read __version__ from version.py'
@@ -114,6 +114,9 @@ if ($SkipDeps) {
 } else {
     Invoke-Checked -FilePath $Python -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip')
     Invoke-Checked -FilePath $Python -Arguments @('-m', 'pip', 'install', '-r', 'requirements.txt')
+    if (Test-Path (Join-Path $RepoRoot 'requirements-dev.txt')) {
+        Invoke-Checked -FilePath $Python -Arguments @('-m', 'pip', 'install', '-r', 'requirements-dev.txt')
+    }
 }
 
 Write-Step '2/7 Bundled helper binaries'
@@ -133,6 +136,30 @@ if ($SkipTests) {
     Write-Host '    skipped by request (-SkipTests)'
 } else {
     Invoke-Checked -FilePath $Python -Arguments @('-m', 'unittest', 'discover', '-s', 'tests')
+
+    # Static check on the modules that ship. pyflakes found two `lambda: str(e)`
+    # callbacks that read an `except ... as e` variable which Python has already
+    # unbound by the time the callback runs - the user saw no error dialog at
+    # all. The tests now cover that specific shape, but pyflakes catches the
+    # whole undefined-name class for free, so run it here too.
+    #
+    # Only 'undefined name' is a build failure. Unused-import reports are
+    # deliberately not: ui.py re-exports names from ui_theme.py on purpose
+    # (existing code and a test both reach them through `ui.`), and the
+    # mutagen imports are availability probes - importing the submodule is how
+    # the code confirms it exists before using it.
+    $linted = @(
+        'main.py', 'ui.py', 'ui_widgets.py',
+        'downloader.py', 'download_queue.py', 'updater.py', 'tag_editor.py'
+    )
+    $lint = (& $Python -m pyflakes @linted 2>&1 | Where-Object {
+        $_ -match 'undefined name'
+    })
+    if ($lint) {
+        $lint | ForEach-Object { Write-Host "    $_" }
+        Fail 'pyflakes found an undefined name in the app modules'
+    }
+    Write-Host '    pyflakes: no undefined names'
 }
 
 Write-Step '4/7 Self-update helper (updater_cli.exe)'
@@ -194,9 +221,7 @@ Write-Host ''
 Write-Host 'To release it (all of this happens on GitHub now):'
 Write-Host "  1. bump version.py to the next version and push"
 Write-Host "  2. GitHub -> Releases -> Draft a new release -> tag v$version -> Publish"
-Write-Host '     The workflow rebuilds Windows and macOS and attaches:'
-Write-Host '       UniversalAudioStudio-<version>-arm64.dmg   (Apple Silicon)'
-Write-Host '       UniversalAudioStudio-<version>-x86_64.dmg  (Intel)'
+Write-Host '     The workflow rebuilds Windows and attaches:'
 Write-Host "       UniversalAudioStudio_${version}_update.zip  (in-app self-update)"
 Write-Host "       $outputBase.exe  (fresh install)"
 Write-Host ''

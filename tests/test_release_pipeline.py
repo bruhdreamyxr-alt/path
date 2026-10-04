@@ -203,15 +203,30 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "Two workflows triggered by the same tag race to create the Release.",
         )
 
-    def test_workflow_builds_every_platform(self):
+    def test_no_macos_build_job_or_script_survives(self):
+        """The macOS build was removed, so nothing may reintroduce it quietly."""
         text = _read(".github/workflows/release.yml")
-        for needle in ("macos-15", "macos-15-intel", "windows-latest",
-                       "bash tools/build_macos.sh", "tools/build_windows.ps1",
+        for needle in ("macos-15", "macos-15-intel", "build-macos",
+                       "build_macos.sh", "check_mac_wheels", "PYTHON_MACOS",
+                       ".dmg"):
+            self.assertNotIn(needle, text,
+                             "%r refers to the removed macOS build" % needle)
+        for relative in ("BUILD_MACOS.md", "UniversalAudioStudio_mac.spec",
+                         "tools/build_macos.sh", "tools/fetch_mac_helpers.sh",
+                         "tools/check_mac_wheels.py"):
+            self.assertFalse(
+                os.path.exists(os.path.join(PROJECT_DIR, *relative.split("/"))),
+                "%s still exists after the macOS build was removed" % relative,
+            )
+
+    def test_workflow_builds_windows(self):
+        text = _read(".github/workflows/release.yml")
+        for needle in ("windows-latest", "tools/build_windows.ps1",
                        "innosetup"):
             self.assertIn(needle, text)
 
     def test_release_job_waits_for_every_build(self):
-        self.assertIn("needs: [build-macos, build-windows]",
+        self.assertIn("needs: [build-windows]",
                       _read(".github/workflows/release.yml"))
 
     def test_release_job_runs_only_for_a_tag(self):
@@ -222,23 +237,18 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(updater.UPDATE_ASSET_SUFFIX,
                       _read(".github/workflows/release.yml"))
 
-    def test_macos_stays_on_python_313(self):
-        """pedalboard publishes no cp314 macOS x86_64 wheel.
-
-        Moving the macOS job to 3.14 would build the Apple Silicon app and fail
-        the Intel one, which is exactly what happened before. Exact patch pins
-        (3.13.15) are fine - only the minor version matters here.
-        """
+    def test_the_python_pin_is_the_one_the_app_is_tested_with(self):
+        """3.14 is the interpreter the Windows app is built and tested with
+        locally, so a different pin would build against untested wheels."""
         text = _read(".github/workflows/release.yml")
-        self.assertRegex(text, r"PYTHON_MACOS: '3\.13(\.\d+)?'")
         self.assertRegex(text, r"PYTHON_WINDOWS: '3\.14(\.\d+)?'")
 
     def test_the_python_pins_are_exact_patch_versions(self):
-        """A bare '3.13' silently moves to a new patch release over time, so two
+        """A bare '3.14' silently moves to a new patch release over time, so two
         builds of the same commit can use different interpreters - the kind of
         drift that only shows up later as a mysterious behaviour change."""
         text = _read(".github/workflows/release.yml")
-        for key in ("PYTHON_MACOS", "PYTHON_WINDOWS"):
+        for key in ("PYTHON_WINDOWS",):
             match = re.search(r"%s: '([^']+)'" % key, text)
             self.assertIsNotNone(match, "%s is not set in the workflow" % key)
             assert match is not None  # assertIsNotNone doesn't narrow for type checkers

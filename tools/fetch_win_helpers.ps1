@@ -11,10 +11,9 @@
         ffmpeg.exe   227 MB
         ffprobe.exe  227 MB   <- GitHub rejects any single file over 100 MB
 
-    so this script fetches them, exactly like tools/fetch_mac_helpers.sh does
-    for the macOS build. It is run both locally (via tools/build_windows.ps1)
-    and by .github/workflows/release.yml on the Windows runner, which starts
-    from a fresh checkout with none of them.
+    so this script fetches them. It is run both locally (via
+    tools/build_windows.ps1) and by .github/workflows/release.yml on the Windows
+    runner, which starts from a fresh checkout with none of them.
 
     Verified download sources (all static, no installer required):
         ffmpeg / ffprobe : gyan.dev release-essentials, BtbN as the fallback
@@ -23,8 +22,7 @@
 
 .PARAMETER SkipAria2
     Do not fetch aria2c.exe. The app then falls back to yt-dlp's built-in
-    downloader: slightly slower, completely fine. The macOS build skips it for
-    a different reason - no static macOS build exists.
+    downloader: slightly slower, completely fine.
 
 .PARAMETER Force
     Re-download helpers that are already present.

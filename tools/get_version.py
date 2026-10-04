@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
 """Print ``__version__`` from version.py.
 
-Exists so tools/build_macos.sh does not need a here-document inside a command
-substitution to read the version:
+Used by both build entry points - tools/build_windows.ps1 and the release
+workflow's tag check - so a Release can never be published under one version
+while its artifacts are named another.
 
-    VERSION="$(python - <<'PY'
-    ...
-    PY
-    )"
-
-macOS still ships bash 3.2 as ``/bin/bash`` (including the GitHub macOS
-runners, which report "Bash 3.2.57(1)-release"), and bash 3.2 cannot parse a
-here-document nested inside ``$( )``. It reads to EOF looking for the matching
-``)`` and aborts with:
-
-    tools/build_macos.sh: line 57: unexpected EOF while looking for matching `)'
-
-That is a *parse* error, so bash exits with status 2 - the step fails with a
-bare "Process completed with exit code 2" and no clue which line was at fault.
+It is a script rather than an inline read because the version has to be read
+from two different shells (PowerShell and bash) without either of them
+re-implementing the parsing.
 
 Usage:
     python tools/get_version.py            # reads version.py next to the repo

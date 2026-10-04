@@ -5,12 +5,12 @@ upload, and no local build required.
 
 ## TL;DR
 
-1. Bump `version.py` to the new version (for example `2.1.0`).
+1. Bump `version.py` to the new version (for example `2.5.0`).
 2. Commit and push it.
-3. GitHub → **Releases** → **Draft a new release** → type the tag `v2.1.0` →
+3. GitHub → **Releases** → **Draft a new release** → type the tag `v2.5.0` →
    **Publish release**.
 4. Wait ~15 minutes. The Release ends up carrying the Windows installer, the
-   self-update ZIP and both `.dmg` files, and installed Windows copies update
+   self-update ZIP, and installed Windows copies update
    themselves from it.
 
 That is the whole process. Today's installed copies take one final update through
@@ -23,8 +23,8 @@ The workflow (`.github/workflows/release.yml`) runs on two triggers:
 
 | Trigger | What happens |
 |---|---|
-| **Run workflow** button | Builds all three platforms, keeps the results as *artifacts* (temporary, login-protected, expire after ~90 days). Useful to test a build. |
-| Pushing a `v*` tag | Builds all three platforms **and** attaches them to a Release: a permanent public download link. |
+| **Run workflow** button | Builds Windows, keeps the results as *artifacts* (temporary, login-protected, expire after ~90 days). Useful to test a build. |
+| Pushing a `v*` tag | Builds Windows **and** attaches it to a Release: a permanent public download link. |
 
 Creating the Release in the GitHub web UI is the easiest way to push that tag,
 and it is the same act as publishing the download page.
@@ -32,8 +32,8 @@ and it is the same act as publishing the download page.
 ## The tag must match version.py
 
 The artifact filenames come from `version.py`, but the Release is named after
-the tag. Tagging `v2.1.0` while `version.py` still says `2.0.0` would publish a
-"2.1.0" Release full of files called 2.0.0 — and installed copies compare
+the tag. Tagging `v2.5.0` while `version.py` still says `2.1.3` would publish a
+"2.5.0" Release full of files called 2.1.3 — and installed copies compare
 themselves against the version number, so they would never see the update.
 
 The `release` job therefore fails on a mismatch and tells you which of the two to
@@ -43,13 +43,10 @@ fix. If you see that error, either bump `version.py` or re-tag.
 
 | File | Who it is for |
 |---|---|
-| `mysetup210.exe` | Windows installer — a fresh install |
-| `UniversalAudioStudio_2.1.0_update.zip` | Windows in-app updater. Users never download this by hand; the app fetches it by itself. |
-| `UniversalAudioStudio-2.1.0-arm64.dmg` | Apple Silicon Macs (M1/M2/M3/M4, any Mac from late 2020 on) |
-| `UniversalAudioStudio-2.1.0-x86_64.dmg` | Intel Macs |
+| `mysetup250.exe` | Windows installer — a fresh install |
+| `UniversalAudioStudio_2.5.0_update.zip` | Windows in-app updater. Users never download this by hand; the app fetches it by itself. |
 
-Two `.dmg` files exist because a single universal one is impossible: `numpy`
-ships architecture-specific wheels, so there is no universal2 build.
+The macOS build was removed, so a Release now carries Windows files only.
 
 ## How updates reach people
 
@@ -80,15 +77,6 @@ Release can reach them on its own - they will never look at GitHub by themselves
 
 They are moved across by one final update through the old channel, which is what
 the next section is for. It is the last time Google Drive is involved at all.
-
-### macOS - manual, for now
-
-The in-app updater is Windows-only, because it works by replacing a running
-`.exe` behind a UAC elevation prompt. On a Mac the **Check for App Updates**
-button says so instead. Macs update by installing a new `.dmg`: send the Release
-link and the new app is dragged over the old one in Applications.
-
-This is the main known gap - see below.
 
 ## Retiring Google Drive - done, for the record
 
@@ -156,7 +144,7 @@ silently, and you would be left wondering why nobody updated.
 ## Building locally instead (optional)
 
 With this in place you never *need* to build locally; the cloud build is the
-release. But both platforms can still be built on their own machine.
+release. Windows can still be built on its own machine.
 
 **Windows** - the same script the CI Windows job runs, so the output is
 identical:
@@ -176,36 +164,24 @@ mysetup<versiondigits>.exe                             installer
 Useful switches: `-SkipTests` (quick iteration), `-SkipDeps` (reuse the current
 environment), `-Python <path>`, `-Iscc <path>`.
 
-**macOS**:
-
-```bash
-bash tools/build_macos.sh
-```
-
 ## What each piece is for
 
 | File | Purpose |
 |---|---|
 | `version.py` | The single source of truth for the version. Artifact names, the installer and the comparison the updater performs all derive from it. |
-| `.github/workflows/release.yml` | Builds macOS (arm64 + x86_64) and Windows, then publishes one Release. |
+| `.github/workflows/release.yml` | Builds Windows, then publishes the Release. |
 | `tools/build_windows.ps1` | The local *and* CI Windows build. |
 | `installer_200.iss` | Inno Setup script. Version and output name are injected with `/D` from `version.py`, so the installer cannot drift. |
 | `tools/fetch_win_helpers.ps1` | Downloads `ffmpeg.exe` / `ffprobe.exe` / `yt-dlp.exe` / `aria2c.exe`, which are too large to commit. |
-| `tools/fetch_mac_helpers.sh` | The macOS equivalent, fetching Mach-O builds. |
 | `_make_update_package.py` | Zips the built app for the in-app updater. |
 | `tools/make_update_manifest.py` | Writes the legacy Drive manifest, for the one transition release that retires Drive. |
 | `updater.py` | Reads the newest Release, downloads it and applies it. |
 
 ## Known gaps
 
-* **Macs are told about updates but do not install them.** The app reports the
-  new version and opens the `.dmg`; the user drags it over the old app in
-  Applications. Windows installs by itself. Macs would need a helper that swaps
-  the `.app` for true parity.
-* **Nothing is code-signed.** macOS makes every user right-click -> Open on
-  first launch, and Windows shows a SmartScreen warning on the installer. An
-  Apple Developer ID ($99/year) and a Windows code-signing certificate are the
-  only remaining thing that changes how the app feels to receive.
+* **Nothing is code-signed.** Windows shows a SmartScreen warning on the
+  installer. A Windows code-signing certificate is the only remaining thing that
+  changes how the app feels to receive.
 
 ## If the build fails
 

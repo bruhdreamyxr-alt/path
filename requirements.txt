@@ -1,8 +1,7 @@
-# Runtime dependencies for UniversalAudioStudio.
-# Pinned to the versions the 2.0.0 build is tested against.
+# Runtime dependencies for UniversalAudioStudio (Windows).
 #
-# These all publish CPython 3.12 wheels for macOS (arm64 + x86_64), which is the
-# interpreter the macOS build uses -- see tools/build_macos.sh.
+# Every pin below has a cp314 win_amd64 wheel - the interpreter the app is
+# built and tested with.
 customtkinter==6.0.0
 darkdetect==0.8.0
 numpy==2.5.0

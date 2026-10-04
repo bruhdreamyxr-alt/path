@@ -1,22 +1,17 @@
 name: Build and release
 
-# One workflow rather than one per platform, because a Release can only be
-# created once: if a macOS workflow and a Windows workflow both triggered on the
-# same tag they would race for it, and the loser's files would silently be
-# missing from the Release.
+# Windows-only: the macOS build was removed, so one job now covers the whole
+# release. (There used to be a macOS job and a Windows job in one workflow,
+# because a Release can only be created once - two workflows triggered on the
+# same tag would race for it.)
 #
 # Triggers:
-#   * a version tag, e.g. v2.1.0 - build every platform and attach the results
-#     to a Release. That Release is what installed copies self-update from.
+#   * a version tag, e.g. v2.1.0 - build and attach the results to a Release.
+#     That Release is what installed copies self-update from.
 #   * the "Run workflow" button - build everything, keep it as artifacts only.
 #
-# The Python version differs per platform for a concrete reason:
-#   macOS   3.13 - pedalboard publishes no cp314 macOS x86_64 wheel (checked
-#                  against PyPI for 0.9.23 and 0.9.25), so 3.14 could only ever
-#                  build the Apple Silicon app. 3.13 has wheels for both Mac
-#                  architectures. tools/check_mac_wheels.py enforces this.
-#   Windows 3.14 - every pin resolves to a cp314 win_amd64 wheel, which is the
-#                  interpreter the Windows app is built and tested with locally.
+# Python 3.14 - every pin resolves to a cp314 win_amd64 wheel, which is the
+# interpreter the Windows app is built and tested with locally.
 
 on:
   workflow_dispatch:      # the "Run workflow" button
@@ -28,75 +23,13 @@ permissions:
   contents: write         # needed to attach files to a Release
 
 env:
-  # Exact patch versions, deliberately - a bare '3.13'/'3.14' resolves to
-  # whatever patch is newest that week, so two builds of the same commit can
-  # silently differ. Both of these have macOS arm64 + x64 and win64 builds
-  # (checked against actions/python-versions), and wheels are tagged per minor
-  # version, so the pins in requirements.txt are unaffected by a patch bump.
-  PYTHON_MACOS: '3.13.15'
+  # Exact patch version, deliberately - a bare '3.14' resolves to whatever patch
+  # is newest that week, so two builds of the same commit can silently differ.
+  # Wheels are tagged per minor version, so the pins in requirements.txt are
+  # unaffected by a patch bump.
   PYTHON_WINDOWS: '3.14.7'
 
 jobs:
-  build-macos:
-    strategy:
-      # One architecture failing must not cancel the other.
-      fail-fast: false
-      matrix:
-        include:
-          # macos-15 is Apple Silicon. macos-14 is deprecated (unsupported from
-          # November 2026), so it is no longer used.
-          - runner: macos-15
-            arch: arm64
-            label: apple-silicon
-          # macos-15-intel is the standard Intel (x86_64) macOS runner.
-          - runner: macos-15-intel
-            arch: x86_64
-            label: intel
-    runs-on: ${{ matrix.runner }}
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ env.PYTHON_MACOS }}
-
-      - name: Show the build environment
-        run: |
-          echo "runner:  ${{ matrix.runner }}  (${{ matrix.arch }})"
-          echo "macOS:   $(sw_vers -productVersion)   arch: $(uname -m)"
-          echo "Python:  $(python -V 2>&1)   at: $(command -v python)"
-          echo "bash:    $BASH_VERSION"
-          echo "curl:    $(curl --version | head -n1)"
-          echo "unzip:   $(command -v unzip || echo MISSING)"
-          echo "codesign: $(command -v codesign || echo MISSING)"
-          df -h . | tail -n1
-
-      - name: Check every pin has a macOS wheel
-        # Catches an uninstallable pin in ~20 seconds with a short readable
-        # list, instead of an opaque "Process completed with exit code N".
-        run: |
-          python tools/check_mac_wheels.py \
-            --python "$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" \
-            --arch "${{ matrix.arch }}"
-
-      - name: Build .app and .dmg
-        run: bash tools/build_macos.sh
-
-      - name: Show what was produced
-        run: |
-          ls -lh dist/
-          du -sh dist/UniversalAudioStudio.app
-
-      - name: Upload the .dmg as a build artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: UniversalAudioStudio-macOS-${{ matrix.label }}-dmg
-          path: dist/*.dmg
-          if-no-files-found: error
-
   build-windows:
     runs-on: windows-latest
 
@@ -165,7 +98,7 @@ jobs:
   release:
     # Only for a tag, and only once every platform has built: a Release missing
     # one platform would leave those users with no way to get the new version.
-    needs: [build-macos, build-windows]
+    needs: [build-windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
 
@@ -179,7 +112,7 @@ jobs:
         # step before publishing - would fail after a full build.
         uses: actions/setup-python@v7
         with:
-          python-version: ${{ env.PYTHON_MACOS }}
+          python-version: ${{ env.PYTHON_WINDOWS }}
 
       - name: Check the tag matches version.py
         # The artifact filenames come from version.py while the Release is named
@@ -224,25 +157,12 @@ jobs:
           body: |
             Universal Audio Studio ${{ github.ref_name }}.
 
-            ### Windows
-
             * `mysetup*.exe` — the installer. Run it and the app is ready to go.
             * `UniversalAudioStudio_*_update.zip` — used only by the in-app
               updater. You do not need to download it: copies of 2.0.0 and later
               find it here on their own.
 
-            ### macOS
-
-            * `...-arm64.dmg` — Apple Silicon (M1/M2/M3/M4; any Mac from late 2020 on)
-            * `...-x86_64.dmg` — Intel
-
-            Open the `.dmg`, drag UniversalAudioStudio onto Applications, then
-            launch it once using **right-click -> Open -> Open**. The app is
-            ad-hoc signed rather than notarised, so macOS warns about an
-            unidentified developer the first time only. Terminal equivalent:
-
-                xattr -dr com.apple.quarantine /Applications/UniversalAudioStudio.app
-
-            Windows copies check this Release automatically and update themselves.
+            Installed copies check this Release automatically and update
+            themselves.
 
 # Google Drive is being retired rather than mirrored to - see RELEASE.md.
