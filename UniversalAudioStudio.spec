@@ -46,6 +46,13 @@ a = Analysis(
         ('assets/tune_lab.ico', '.'),
     ] + _ARIA2_DATAS + _FFPLAY_DATAS,
     hiddenimports=[
+        # The theme/icon primitives and the queue list widget were split out of
+        # ui.py. ui.py imports both with literal `from ... import ...`, so
+        # static analysis follows them, but they are listed explicitly so a
+        # frozen build that somehow missed them fails loudly here rather than at
+        # the user's first click.
+        'ui_theme',
+        'ui_widgets',
         'yt_dlp',
         'yt_dlp.postprocessor.embedthumbnail',
         'yt_dlp.postprocessor.ffmpeg',
