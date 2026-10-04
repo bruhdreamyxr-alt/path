@@ -27,10 +27,89 @@ def _clean_error_text(text: Any, fallback: str = "") -> str:
     cleaned = _strip_ansi(text).strip()
     return cleaned if cleaned else fallback
     
+# The "Sign in to confirm you're not a bot" wall is keyed to the network, not
+# to the query: it answers identically for every track, so re-running it for
+# each new title only spends a round-trip to reach the same dead end. Remember
+# it briefly so later searches can say why immediately, and expire the note
+# because these walls do sometimes lift (network change, VPN on/off).
+_network_blocked_reason: str = ""
+_network_blocked_at: float = 0.0
+_NETWORK_BLOCK_TTL = 1800.0  # seconds; re-probe the network after this
+
+
+def note_network_block(reason: str) -> None:
+    """Record a YouTube refusal so the next search can report it for free."""
+    global _network_blocked_reason, _network_blocked_at
+    _network_blocked_reason = reason
+    _network_blocked_at = time.monotonic()
+    logger.warning("YouTube refused this network: %s",
+                   reason.strip().splitlines()[0] if reason.strip() else "unknown")
+
+
+def cached_network_block() -> str:
+    """A still-valid refusal message, or '' when the network may be fine now."""
+    if not _network_blocked_reason:
+        return ""
+    if time.monotonic() - _network_blocked_at > _NETWORK_BLOCK_TTL:
+        return ""
+    return _network_blocked_reason
+
+
+def clear_network_block() -> None:
+    """Forget a cached refusal, so the next search genuinely probes again."""
+    global _network_blocked_reason, _network_blocked_at
+    _network_blocked_reason = ""
+    _network_blocked_at = 0.0
+
+
 def _is_aria2_failure(text: Any) -> bool:
     """Return whether an error indicates that aria2 itself failed."""
     cleaned = _clean_error_text(text).lower()
     return "aria2c exited with code" in cleaned or ("aria2c" in cleaned and "code 28" in cleaned)
+
+
+def _youtube_refusal_reason(text: Any) -> str:
+    """What YouTube answered when it *refused*, or '' when it simply had no match.
+
+    "Could not find any matching track. Please check the spelling and try
+    again." is only true when YouTube answered and nothing fit. When the search
+    never ran -- the IP-level "Sign in to confirm you're not a bot" wall, a 403,
+    a 429 -- the spelling is not the problem, and saying it is sends people off
+    to retype a title that was already correct. The wall answers identically for
+    every track, and that is the only visible tell that it is the connection
+    rather than the query.
+    """
+    cleaned = _clean_error_text(text).lower()
+    if not cleaned:
+        return ""
+    if "not a bot" in cleaned or "sign in to confirm" in cleaned:
+        return (
+            "YouTube refused the search: it wants this connection to sign in "
+            "(\"Sign in to confirm you're not a bot\").\n\n"
+            "The search never ran, so this is not a spelling problem - the track "
+            "and artist may be exactly right. YouTube answers this way for every "
+            "title from this network.\n\n"
+            "What still works: paste the track's SoundCloud link, because "
+            "SoundCloud downloads do not go through YouTube. Otherwise try again "
+            "later, from another network, or through a VPN."
+        )
+    # yt-dlp embeds the video ID in its error strings ("ERROR: [youtube]
+    # 8sN4030kX: Video unavailable"), so a bare substring test for 403/429
+    # misreads any ID that happens to contain those digits. Require a word
+    # boundary so only a standalone status code counts.
+    if re.search(r"\b403\b", cleaned) or "forbidden" in cleaned:
+        return (
+            "YouTube refused the search (HTTP 403: Forbidden).\n\n"
+            "It never answered, so this is not a spelling problem - the search did "
+            "not run. Try again later, from another network, or through a VPN."
+        )
+    if re.search(r"\b429\b", cleaned) or "too many requests" in cleaned:
+        return (
+            "YouTube is rate-limiting this network (HTTP 429: Too Many Requests).\n\n"
+            "The search never ran, so the spelling is not the problem. Wait a few "
+            "minutes and try again."
+        )
+    return ""
 
 
 def _no_window_kwargs() -> dict:
@@ -309,7 +388,6 @@ def set_performance_config(cfg: dict):
 
     Expected keys: use_aria2 (bool), aria2_connections (int), concurrent_fragment_downloads (int), http_chunk_size (int)
     """
-    global performance_config
     cfg = dict(cfg)
     if 'aria2_connections' in cfg:
         cfg['aria2_connections'] = _clamp_aria2_connections(cfg['aria2_connections'])
@@ -502,7 +580,6 @@ def get_download_folder() -> str:
     Returns the user-chosen override when it points at a real directory,
     otherwise the standard Downloads folder.
     """
-    global _DOWNLOAD_FOLDER_OVERRIDE
     override = _DOWNLOAD_FOLDER_OVERRIDE
     if override and os.path.isdir(override):
         return override
@@ -1141,6 +1218,16 @@ def build_fast_yt_dlp_options(base_dir, output_template, audio_only: bool = Fals
         'noplaylist': True,
         'retries': 5,
         'fragment_retries': 10,
+        # Back off BETWEEN RETRIES ONLY. Do NOT use sleep_interval/sleep_requests
+        # for this: those are unconditional -- sleep_interval sleeps before
+        # *every* download (even a first-try success) and sleep_requests sleeps
+        # between every extraction request, so they tax the happy path to
+        # protect a failure that usually never happens.
+        # retry_sleep only fires when a request actually fails, which is the
+        # 429 case that motivated it: re-firing a rate-limited request
+        # immediately just deepens the limit.
+        #   exp=1:20 -> 1,2,4,8,16,20,20... seconds, capped at 20
+        'retry_sleep': {'http': 'exp=1:20', 'fragment': 'exp=1:20', 'extractor': 'exp=1:20'},
         'continue': True,  # resume interrupted .part downloads (aria2 also gets -c below)
         # An explicit download action must always produce the file. yt-dlp's
         # default never replaces an existing *finished* media file: it prints
@@ -2031,7 +2118,7 @@ def _save_sidecar_artwork(filepath, status_callback, detail_callback,
                 callback(f"Saved as WAV. Cover art saved as {os.path.basename(sidecar)}.", "#2ecc71")
                 return
 
-    callback(f"Saved as WAV (no cover art available).", "#f39c12")
+    callback("Saved as WAV (no cover art available).", "#f39c12")
 
 
 def _report_mp3_artwork_status(
@@ -2110,6 +2197,11 @@ def _fallback_download_with_ytdlp_exe(
         '--force-overwrites',
         '--retries', '5',
         '--fragment-retries', '10',
+        # Retry-only backoff; see build_fast_yt_dlp_options for why
+        # --sleep-interval/--sleep-requests are the wrong (and much slower) tool.
+        '--retry-sleep', 'http:exp=1:20',
+        '--retry-sleep', 'fragment:exp=1:20',
+        '--retry-sleep', 'extractor:exp=1:20',
         '--socket-timeout', '20',
         '--hls-prefer-native',
         '--extractor-retries', '5',
@@ -2813,6 +2905,10 @@ def download_track(
             before_files=track_before_files,
         )
         success_callback(download_folder_name)
+        # A download that reached YouTube and worked proves the network is
+        # usable again, so drop any stale refusal instead of failing fast for
+        # the next half hour on a wall that has already gone.
+        clear_network_block()
         return True
 
     if is_soundcloud:
@@ -2828,6 +2924,10 @@ def download_track(
         can_direct = soundcloud_direct_first and not is_sc_set
 
         sc_downloaded = False
+        # Why the direct attempt failed, so the fallback's own failure can say
+        # whether this track was ever downloadable from SoundCloud at all (a
+        # DRM-protected upload is not, whoever asks for it).
+        sc_fail_reason = ""
         if can_direct:
             # Step 1: Try to download directly from SoundCloud first.
             status_callback("Attempting SoundCloud direct download...", "#f1c40f")
@@ -2861,7 +2961,11 @@ def download_track(
                     ydl_opts.pop('external_downloader', None)
                     ydl_opts.pop('external_downloader_args', None)
                 e_str = (str(e) or '').lower()
-                if '403' in e_str or 'forbidden' in e_str:
+                if 'drm' in e_str:
+                    # Widevine-protected: yt-dlp cannot decrypt it, so no retry
+                    # and no other client will change the outcome.
+                    reason = "DRM-protected"
+                elif '403' in e_str or 'forbidden' in e_str:
                     reason = "blocked"
                 elif '429' in e_str or 'too many' in e_str:
                     reason = "rate-limited"
@@ -2869,6 +2973,7 @@ def download_track(
                     reason = "network timeout"
                 else:
                     reason = "unavailable"
+                sc_fail_reason = reason
                 status_callback(
                     f"SoundCloud direct download {reason}. Trying YouTube fallback...",
                     "#f39c12",
@@ -2932,6 +3037,41 @@ def download_track(
         except DownloadCancelled:
             raise
         except Exception as e:
+            refusal = _youtube_refusal_reason(e)
+            if refusal:
+                # YouTube never ran the search, so nothing here is the user's
+                # fault; say which wall was hit instead of blaming the title.
+                note_network_block(refusal)
+                logger.warning("SoundCloud fallback hit a YouTube refusal: %s", e)
+                prefix = ""
+                if sc_fail_reason:
+                    prefix = (
+                        f"The SoundCloud copy could not be downloaded "
+                        f"({sc_fail_reason}), and the YouTube fallback could not "
+                        f"run.\n\n"
+                    )
+                error_callback(prefix + refusal)
+                return
+            if sc_fail_reason:
+                # Only DRM is a dead end the user can do nothing about; every
+                # other reason may simply succeed on a later attempt.
+                if sc_fail_reason == "DRM-protected":
+                    why = (
+                        "The SoundCloud upload is DRM-protected, which no "
+                        "downloader can decrypt, so it was searched for on YouTube "
+                        "instead, and nothing there matched."
+                    )
+                else:
+                    why = (
+                        f"The SoundCloud copy could not be downloaded "
+                        f"({sc_fail_reason}), so it was searched for on YouTube "
+                        f"instead, and nothing there matched."
+                    )
+                error_callback(
+                    "Could not find any matching track. Please check the spelling "
+                    "and try again.\n\n" + why
+                )
+                return
             error_callback(f"Could not process SoundCloud track info:\n{e}")
             return
 
@@ -2983,6 +3123,14 @@ def download_track(
     final_input = raw_input
     best_entry = None
     if not is_url:
+        # Same fail-fast as the URL path: if YouTube already refused this
+        # network, don't spend another doomed search proving it again.
+        known_block = cached_network_block()
+        if known_block:
+            status_callback(
+                "YouTube refused this connection earlier. Skipping search...", "#e74c3c")
+            error_callback(known_block)
+            return
         status_callback("Searching YouTube...", "#f1c40f")
         if progress_callback:
             ydl_opts['progress_hooks'] = [build_progress_hook(status_callback, progress_callback)]
@@ -3109,6 +3257,15 @@ def download_track(
                 if from_page:
                     fallback_text = from_page
             fallback_query = fallback_text or raw_input
+            # If YouTube already refused this network moments ago, do not pay
+            # for another doomed round-trip: report it now, with the same words
+            # the user would have got anyway.
+            known_block = cached_network_block()
+            if known_block:
+                status_callback(
+                    "YouTube refused this connection earlier. Skipping search...", "#e74c3c")
+                error_callback(known_block)
+                return
             status_callback("Searching YouTube Alternative...", "#f1c40f")
             try:
                 if not python_can_download:
@@ -3132,10 +3289,30 @@ def download_track(
                     return
             except DownloadCancelled:
                 raise
-            except Exception:
-                error_callback("Could not find any matching track. Please check the spelling and try again.")
+            except Exception as search_error:
+                refusal = _youtube_refusal_reason(search_error)
+                if refusal:
+                    note_network_block(refusal)
+                    logger.warning("Search fallback hit a YouTube refusal: %s", search_error)
+                error_callback(
+                    refusal
+                    or "Could not find any matching track. Please check the spelling and try again."
+                )
         else:
-            error_callback("Could not find any matching track. Please check the spelling and try again.")
+            # Keep classifying here too: this branch also fires when the final
+            # download itself was refused. Log it either way, because this is
+            # the branch that used to be indistinguishable from a blocked
+            # network and sent us chasing the wrong cause.
+            refusal = _youtube_refusal_reason(download_error)
+            if refusal:
+                note_network_block(refusal)
+                logger.warning("Final YouTube download hit a refusal: %s", download_error)
+            else:
+                logger.info("YouTube search returned no match (no refusal detected)")
+            error_callback(
+                refusal
+                or "Could not find any matching track. Please check the spelling and try again."
+            )
 
 
 # ==========================================

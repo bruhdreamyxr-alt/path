@@ -504,6 +504,45 @@ class DownloadQueue:
             except Exception as e:
                 logger.warning("History upsert failed (%s): %s", HISTORY_FILE, e)
 
+    def prune_missing_history(self) -> int:
+        """Drop history entries whose file is gone from disk. Returns the count.
+
+        The History page marks every one of these "✗ missing", which is honest
+        but leaves the list looking broken: moving or deleting a downloads
+        folder turns most of it red without anything having gone wrong. This is
+        opt-in from the UI and only ever removes entries with no file left to
+        open, so it cannot discard anything the user could still use.
+
+        An entry with no recorded path at all is kept - there is nothing to
+        check, and dropping it would quietly lose a download that is simply
+        recorded without a destination.
+        """
+        with _STORE_LOCK:
+            try:
+                history = _read_json_file(HISTORY_FILE)
+            except Exception as e:
+                logger.warning("Prune history failed (%s): %s", HISTORY_FILE, e)
+                return 0
+
+            kept, removed = [], 0
+            for entry in history:
+                filepath = ""
+                if isinstance(entry, dict):
+                    filepath = str(entry.get("filepath") or "")
+                if filepath and not os.path.exists(filepath):
+                    removed += 1
+                    continue
+                kept.append(entry)
+
+            if removed:
+                try:
+                    _write_json_file(HISTORY_FILE, kept)
+                except Exception as e:
+                    logger.warning("Prune history write failed (%s): %s",
+                                   HISTORY_FILE, e)
+                    return 0
+            return removed
+
     def clear_history(self):
         """Remove all saved download history entries."""
         with _STORE_LOCK:
