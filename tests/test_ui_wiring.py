@@ -11,6 +11,7 @@ rest of the suite: a dropped Enter binding, a reintroduced repaint between
 map/unmap, or a full rebuild of the queue rows per progress tick would all
 ship silently.
 """
+import ast
 import importlib.util
 import json
 import os
@@ -326,10 +327,19 @@ class SingleInstanceTests(unittest.TestCase):
     """A second launch must focus the running window, not start a twin."""
 
     def test_windows_mutex_guard_exists(self):
-        src = _source()
+        # The mutex logic moved to main.py when startup was split out of ui.py;
+        # this is about the app having the guard, not about which file holds it.
+        src = (_REPO / "main.py").read_text(encoding="utf-8")
         self.assertIn("TuneLab_SingleInstance_Mutex", src)
-        self.assertIn("ERROR_ALREADY_EXISTS", src)
-        self.assertIn("sys.exit(0)", src)
+        self.assertIn("183", src)  # ERROR_ALREADY_EXISTS, spelled numerically
+        self.assertIn("SetForegroundWindow", src)
+
+    def test_ui_still_starts_the_app(self):
+        # ui.py keeps its __main__ (the PyInstaller entry script depends on it),
+        # and it must delegate rather than re-implement.
+        src = _source()
+        self.assertIn('if __name__ == "__main__":', src)
+        self.assertIn("main.run(", src)
 
 
 class ShortcutTests(unittest.TestCase):
@@ -588,13 +598,34 @@ class MergedThemeControlTests(unittest.TestCase):
 class QueueRowThemingTests(unittest.TestCase):
     """The queue list is themed CTk rows, not a raw tk.Listbox."""
 
+    @staticmethod
+    def _ui_source_everywhere() -> str:
+        """The UI's own source, across the modules it now lives in.
+
+        The list widget moved to ui_widgets.py, so a grep of ui.py alone would
+        report "no _QueueRowList, no Listbox API" and pass/fail for the wrong
+        reason. These guards are about what the app uses, not which file it is
+        written in.
+        """
+        return "\n".join(
+            (_REPO / name).read_text(encoding="utf-8")
+            for name in ("ui.py", "ui_widgets.py", "ui_theme.py")
+        )
+
     def test_no_live_listbox_construction(self):
-        src = _source()
+        src = self._ui_source_everywhere()
         self.assertNotIn("tk.Listbox(", src)
         self.assertIn("class _QueueRowList", src)
 
+    def test_the_app_still_uses_the_standalone_class(self):
+        # Not just "the class exists somewhere": ui.py must be the module that
+        # instantiates it, or the split silently left a dead class behind.
+        import ui
+        from ui_widgets import _QueueRowList
+        self.assertIs(ui._QueueRowList, _QueueRowList)
+
     def test_rows_speak_the_listbox_api_the_refresh_logic_pins(self):
-        src = _source()
+        src = self._ui_source_everywhere()
         for api in ("def size(", "def insert(", "def delete(",
                     "def get(", "def itemconfig(", "def curselection("):
             self.assertIn(api, src)
@@ -828,7 +859,12 @@ class MessageboxRetirementTests(unittest.TestCase):
         self.assertEqual(self.SHOW_CALLS.findall(_source()), ["showerror"])
 
     def test_confirmations_are_still_synchronous(self):
-        self.assertEqual(len(self.ASK_CALLS.findall(_source())), 6)
+        # 7: queue remove/cancel/clear, Clear History, the cache clear, and
+        # Remove Missing Files (history). The exact number is a tripwire - a
+        # confirmation dialog appearing or disappearing unnoticed is how a
+        # destructive action ends up with no prompt, so a new one means updating
+        # this count deliberately rather than by accident.
+        self.assertEqual(len(self.ASK_CALLS.findall(_source())), 7)
 
     def test_worker_thread_dialogs_are_marshalled(self):
         # A Toplevel built on a worker thread is a Tk threading crash, so the
@@ -2425,6 +2461,323 @@ class FormControlThemeTests(unittest.TestCase):
         probe = (_REPO / "tools" / "probe_chrome.py").read_text(encoding="utf-8")
         self.assertIn("check_form_controls", probe)
         self.assertIn("os._exit(1 if control_fails else 0)", probe)
+
+
+class OptionalRowVisibilityTests(unittest.TestCase):
+    """Empty text rows must not claim vertical space.
+
+    The Downloader page stacked five labels that are all empty on a fresh
+    launch (detail, speed, save folder, yt-dlp notice, tag hint). A packed but
+    empty CTkLabel still reserves its full line height, which is what produced
+    the dead gap down the middle of the page.
+    """
+
+    def test_the_helper_watches_configure_not_just_a_textvariable(self):
+        body = _method_source("_pack_h_if_used")
+        # Every real update is configure(text=...). Watching a textvariable (the
+        # obvious approach) silently misses all of them and the row stays hidden
+        # after its first message.
+        self.assertIn("label.configure = _configure_and_sync", body)
+        self.assertIn('if "text" in kw', body)
+
+    def test_the_helper_refuses_a_blank_row(self):
+        body = _method_source("_sync_h_if_used")
+        self.assertIn("pack_forget", body)
+        self.assertIn("strip()", body)
+
+    def test_the_downloader_rows_go_through_the_helper(self):
+        body = _method_source("build_downloader_view")
+        for name in ("dl_detail", "dl_speed_lbl", "save_folder_lbl",
+                     "_ytdlp_notice_lbl"):
+            # Matched with a regex rather than a fixed substring: the call is
+            # wrapped across lines for the longer ones, so a literal check would
+            # pass on the short calls and silently skip the rest.
+            self.assertRegex(
+                body, r"_pack_h_if_used\(\s*self\.%s\b" % name,
+                "%s should be optional, not always packed" % name)
+
+
+class PreviewStopButtonTests(unittest.TestCase):
+    """A Stop button must only exist while its preview is running.
+
+    Both were permanently visible and disabled, which read as two live controls
+    and put "stop" on screen when there was nothing to stop.
+    """
+
+    def test_stops_start_hidden(self):
+        src = _source()
+        self.assertEqual(src.count("self.btn_stop_audio.grid_remove()"), 1)
+        self.assertEqual(src.count("self.btn_stop_video.grid_remove()"), 1)
+
+    def test_every_stop_toggle_also_changes_visibility(self):
+        src = _source()
+        # No bare configure(state=...) may survive: that is what let a visible
+        # disabled Stop button exist in the first place.
+        self.assertNotIn("btn_stop_audio.configure(state=", src)
+        self.assertNotIn("btn_stop_video.configure(state=", src)
+        self.assertIn("self._show_stop_button(self.btn_stop_audio, True)", src)
+        self.assertIn("self._show_stop_button(self.btn_stop_video, False)", src)
+
+    def test_the_helper_shows_and_hides(self):
+        body = _method_source("_show_stop_button")
+        self.assertIn("button.grid()", body)
+        self.assertIn("button.grid_remove()", body)
+
+
+class ProgressRowVisibilityTests(unittest.TestCase):
+    """The progress bar and Cancel are noise until a download is running."""
+
+    def test_the_row_starts_packed_away(self):
+        self.assertIn("progress_row.pack_forget()",
+                      _method_source("build_downloader_view"))
+
+    def test_it_follows_the_download_lifecycle(self):
+        body = _method_source("set_download_buttons_state")
+        self.assertIn("self._show_progress_row(not enabled)", body)
+
+    def test_the_helper_toggles_the_row(self):
+        body = _method_source("_show_progress_row")
+        self.assertIn("row.pack(", body)
+        self.assertIn("row.pack_forget()", body)
+
+
+class HistorySearchFieldTests(unittest.TestCase):
+    """The search box was an unlabelled empty rectangle.
+
+    customtkinter 6.0.0 never draws the placeholder of an entry that has a
+    textvariable, because _activate_placeholder() guards on
+    ``self._textvariable == ""`` - a StringVar compared to a string, always
+    False. Forcing it on by hand was tried and reverted (it collided with the
+    library's own focus/insert handling), so the field is labelled instead.
+    """
+
+    def test_there_is_no_placeholder_to_silently_fail(self):
+        body = _source()
+        history_view = body[body.index("def build_history_view"):]
+        history_view = history_view[:history_view.index("\n    def ", 10)]
+        self.assertNotIn("placeholder_text=", history_view)
+
+    def test_the_field_carries_a_visible_label(self):
+        self.assertIn('search_row, text="Search"', _source())
+
+    def test_the_filter_never_matches_the_placeholder_text(self):
+        body = _method_source("_refresh_history_view")
+        # A shown placeholder lives in the same StringVar as real input, so the
+        # filter has to ask whether the placeholder is active.
+        self.assertIn("_placeholder_text_active", body)
+
+
+class PruneMissingHistoryTests(unittest.TestCase):
+    """History entries whose file is gone are removable, but never silently."""
+
+    def test_pruning_needs_a_confirmation(self):
+        self.assertIn("messagebox.askyesno",
+                      _method_source("_prune_missing_history"))
+
+    def test_the_button_is_only_offered_when_something_is_prunable(self):
+        body = _method_source("_refresh_history_view")
+        self.assertIn('state="normal" if missing else "disabled"', body)
+
+    def test_prune_keeps_entries_with_no_recorded_path(self):
+        queue_src = (_REPO / "download_queue.py").read_text(encoding="utf-8")
+        body = re.search(r"\n    def prune_missing_history\(.*?(?=\n    def |\Z)",
+                         queue_src, re.DOTALL)
+        assert body is not None, "download_queue.py lost prune_missing_history"
+        src = body.group(0)
+        self.assertIn("if filepath and not os.path.exists(filepath)", src)
+        self.assertIn("kept.append(entry)", src)
+
+    def test_prune_reports_how_many_it_removed(self):
+        queue_src = (_REPO / "download_queue.py").read_text(encoding="utf-8")
+        self.assertIn("def prune_missing_history(self) -> int:", queue_src)
+
+
+class DestructiveButtonWeightTests(unittest.TestCase):
+    """Actions that open a confirmation should not be the loudest control."""
+
+    def test_confirmed_clears_are_not_full_danger_fills(self):
+        src = _source()
+        for name in ("btn_clear_history", "clear_cache_btn"):
+            self.assertIn('_style_button(self.%s, "ghost"' % name, src,
+                          "%s opens a dialog; a full danger fill overweights it"
+                          % name)
+
+    def test_immediate_stop_actions_keep_the_danger_fill(self):
+        src = _source()
+        for name in ("btn_stop_audio", "btn_stop_video", "btn_cancel_download"):
+            self.assertIn('_style_button(self.%s, "danger"' % name, src,
+                          "%s acts immediately and should stay red" % name)
+
+
+class VerticalRhythmTests(unittest.TestCase):
+    """Stacked rows are a whole rhythm step apart."""
+
+    @staticmethod
+    def _theme_source() -> str:
+        # The UITheme tokens moved to ui_theme.py; this assertion is about where
+        # the constant is *defined*, so it has to read that file now.
+        return (_REPO / "ui_theme.py").read_text(encoding="utf-8")
+
+    def test_the_rhythm_is_one_token(self):
+        self.assertEqual(
+            re.search(r"RHYTHM = (\d+)", self._theme_source()).group(1), "8")
+
+    def test_the_rhythm_token_is_available_to_the_ui(self):
+        import ui
+        self.assertEqual(ui.UITheme.RHYTHM, 8)
+
+    def test_the_downloader_page_uses_it(self):
+        body = _method_source("build_downloader_view")
+        # No ad-hoc 2/4/6/8 paddings left between the stacked rows.
+        self.assertNotIn("pady=(0, 2)", body)
+        self.assertNotIn("pady=(0, 4)", body)
+        self.assertGreaterEqual(body.count("UITheme.RHYTHM"), 6)
+
+
+class ModuleSplitTests(unittest.TestCase):
+    """The UI was split out of the 7k-line ui.py; keep the split honest.
+
+    Each assertion is about a property that can rot silently: a module that is
+    created but never imported still "passes" a file-exists check, and a
+    re-export that is dropped breaks an import at runtime, not at build time.
+    """
+
+    def test_the_new_modules_exist_and_import(self):
+        import ui_theme
+        import ui_widgets
+        self.assertTrue(ui_theme.UITheme)
+        self.assertTrue(ui_widgets._QueueRowList)
+
+    def test_ui_reexports_the_theme_names(self):
+        # Call sites say ui.UITheme / from ui import COLOR_THEMES. If a name
+        # stops being re-exported, every one of those breaks at runtime.
+        import ui
+        import ui_theme
+        for name in ("UITheme", "COLOR_THEMES", "CUSTOM_THEME_ROLES",
+                     "LEGACY_HEX_ROLES", "_on_color", "_split_headline",
+                     "_icon_shapes", "_paint_icon", "_render_icon_image",
+                     "custom_palette", "contrast_failures", "_normalize_hex",
+                     "_lift", "_mix", "_contrast", "_rel_luminance",
+                     "_ring_color", "_ui_font", "_UI_FONT_FAMILY"):
+            self.assertTrue(hasattr(ui, name),
+                            "ui.%s is no longer re-exported" % name)
+            if hasattr(ui_theme, name):
+                self.assertIs(getattr(ui, name), getattr(ui_theme, name),
+                              "ui.%s is a copy, not the shared object" % name)
+
+    def test_the_theme_module_is_free_of_widget_code(self):
+        # The reason this split is safe is that ui_theme.py never touches Tk. A
+        # stray widget there would mean the "pure primitives" split had quietly
+        # become a dependency cycle waiting to happen. Docstrings are stripped
+        # first: they legitimately mention widget names (CTkFrame.configure() is
+        # described in a comment about the theme walker), and matching prose
+        # would make this guard cry wolf on its first real edit.
+        src = (_REPO / "ui_theme.py").read_text(encoding="utf-8")
+        import io
+        import tokenize
+        code = []
+        prev_type = tokenize.INDENT
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            # Drop any STRING token that is a whole statement (a docstring).
+            if tok.type == tokenize.STRING and prev_type in (
+                    tokenize.INDENT, tokenize.NEWLINE, tokenize.NL,
+                    tokenize.DEDENT):
+                prev_type = tok.type
+                continue
+            if tok.type not in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE):
+                prev_type = tok.type
+                code.append(tok.string)
+        code_src = " ".join(code)
+        for banned in ("CTkButton", "CTkFrame", "CTkEntry", ".pack(", ".grid("):
+            self.assertNotIn(banned, code_src,
+                             "ui_theme.py must stay free of widget code (%r)"
+                             % banned)
+        self.assertNotIn("import tkinter", code_src)
+
+    def test_main_owns_startup_and_ui_delegates(self):
+        main_src = (_REPO / "main.py").read_text(encoding="utf-8")
+        self.assertIn("def run(", main_src)
+        self.assertIn("def _focus_running_instance(", main_src)
+        # ui.py must not keep a second copy of the single-instance logic.
+        self.assertNotIn("TuneLab_SingleInstance_Mutex", _source())
+
+    def test_the_split_actually_reduced_ui(self):
+        lines = len((_REPO / "ui.py").read_text(encoding="utf-8").splitlines())
+        self.assertLess(lines, 6000,
+                        "ui.py is back to being the 7k-line monolith")
+
+
+class DeferredExceptionBindingTests(unittest.TestCase):
+    """A queued lambda must not close over an `except ... as e` variable.
+
+    Python deletes that name when the except block ends, and self.after()
+    lambdas run on a later mainloop turn - so `lambda: str(e)` raised
+    NameError and the user saw no error dialog at all. Both instances here
+    were found with pyflakes; this keeps a third from appearing.
+    """
+
+    def test_no_module_fails_to_compile(self):
+        """A syntax error in any app module should fail loudly, not at runtime."""
+        for name in ("ui.py", "ui_theme.py", "ui_widgets.py", "main.py",
+                     "downloader.py", "download_queue.py", "updater.py",
+                     "tag_editor.py"):
+            path = _REPO / name
+            try:
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            except SyntaxError as exc:  # pragma: no cover - a real breakage
+                self.fail("%s no longer compiles: %s" % (name, exc))
+
+    def _handler_variable(self, node):
+        """The name an `except ... as <name>` handler binds, if any."""
+        return node.name if isinstance(node, ast.ExceptHandler) and node.name else None
+
+    def test_no_deferred_lambda_reads_the_except_variable(self):
+        """The real check, done on the syntax tree.
+
+        `except ... as e:` unbinds ``e`` when the block ends, but a callback
+        handed to ``self.after()`` runs on a later mainloop turn - by then the
+        name is gone and the dialog raises NameError instead of appearing. The
+        correct rewrite binds what it needs to a local (``err_text = ...``) and
+        the lambda closes over *that*.
+
+        Walking the AST is what makes this trustworthy: a regex cannot tell an
+        ``except ... as e`` from the same words inside a comment or docstring,
+        which is how the first version of this test reported its own fix as
+        the bug it was guarding against.
+        """
+        problems = []
+        for name in ("ui.py", "ui_theme.py", "ui_widgets.py", "main.py",
+                     "downloader.py", "download_queue.py", "updater.py",
+                     "tag_editor.py"):
+            path = _REPO / name
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for handler in (n for n in ast.walk(tree)
+                            if self._handler_variable(n)):
+                var = self._handler_variable(handler)
+                # Only the handler's own statements can reach the deferred call;
+                # a nested def/lambda closes over its own locals.
+                for node in ast.walk(handler):
+                    if not isinstance(node, ast.Lambda):
+                        continue
+                    loads = {n.id for n in ast.walk(node.body)
+                             if isinstance(n, ast.Name) and isinstance(
+                                 n.ctx, ast.Load)}
+                    if var in loads:
+                        problems.append(
+                            "%s:%d - a deferred lambda reads the except-variable "
+                            "%r; bind the message to a local first, it is deleted "
+                            "when the block ends" % (name, node.lineno, var))
+        self.assertEqual([], problems, "\n".join(problems))
+
+    def test_no_lambda_reads_the_except_variable(self):
+        """Deprecated alias kept so an existing -m unittest selector still works."""
+        self.test_no_deferred_lambda_reads_the_except_variable()
+
+    def test_the_two_known_sites_bind_their_message(self):
+        src = (_REPO / "ui.py").read_text(encoding="utf-8")
+        self.assertIn('"Update Error", "Failed to update yt-dlp.", detail=err_text',
+                      src)
+        self.assertIn('_show_error_dialog("Cache Clear Error", err_text)', src)
 
 
 if __name__ == "__main__":

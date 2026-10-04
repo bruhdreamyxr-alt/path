@@ -1,0 +1,2 @@
+# Build/dev-only, not needed to run the app.
+pyflakes==3.2.0
