@@ -1,20 +1,46 @@
-"""Audit WCAG contrast across every palette in ui.py.
+"""Audit WCAG contrast across every palette the app ships.
 
 Static: parses COLOR_THEMES with ast (no GUI, no ctk import), so it is safe
 to run anywhere and cannot leave fingerprints.
+
+The palettes live in ui_theme.py since the module split; they used to be read
+out of ui.py, which now only re-exports them. Rather than hardcode one
+filename, ask ui_theme where COLOR_THEMES is assigned and fall back to ui.py,
+so moving the palettes again does not silently turn this audit into a no-op
+that always exits 1.
 """
 import ast
+import os
 import sys
 
-themes = None
-tree = ast.parse(open('ui.py', encoding='utf-8').read())
-for node in tree.body:
-    if isinstance(node, ast.Assign):
-        for t in node.targets:
-            if isinstance(t, ast.Name) and t.id == 'COLOR_THEMES':
-                themes = ast.literal_eval(node.value)
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+
+
+def _themes_from(*filenames):
+    """The literal COLOR_THEMES dict assigned at module level, or None."""
+    for filename in filenames:
+        path = os.path.join(REPO, filename)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding='utf-8') as fh:
+            tree = ast.parse(fh.read(), path)
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id == 'COLOR_THEMES':
+                        try:
+                            return ast.literal_eval(node.value)
+                        except ValueError:
+                            # Built by a call (dict(...)) rather than a literal.
+                            # Fall through and let the caller report it.
+                            return None
+    return None
+
+
+themes = _themes_from('ui_theme.py', 'ui.py')
 if not themes:
-    sys.exit('COLOR_THEMES not found')
+    sys.exit('COLOR_THEMES not found in ui_theme.py or ui.py')
 
 
 def lum(col):

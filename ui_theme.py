@@ -819,9 +819,8 @@ CUSTOM_THEME_HOVERS = {
     'purple': 'purple_hover',
 }
 
-# The same bars tools/audit_contrast.py holds the curated palettes to. Mirrored
-# here (rather than imported) because that tool parses ui.py with ast and must
-# keep working without importing customtkinter.
+# Mirrored rather than imported because tools/audit_contrast.py parses this
+# module with ast and must keep working without importing customtkinter.
 CUSTOM_CONTRAST_PAIRS = (
     ('text', 'bg', 4.5), ('text', 'surface', 4.5), ('text', 'sidebar', 4.5),
     ('text', 'sidebar_active', 4.5),
